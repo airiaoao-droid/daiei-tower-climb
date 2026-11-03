@@ -37,6 +37,7 @@ export class TowerScene {
   private rowPool: PooledRowVisual[] = [];
   private character = new THREE.Group();
   private auraRing!: THREE.Mesh;
+  private pickupRing!: THREE.Mesh;
   private arms: THREE.Group[] = [];
   private legs: THREE.Group[] = [];
   private clouds: THREE.Group[] = [];
@@ -296,6 +297,8 @@ export class TowerScene {
     this.mesh(this.character, this.box, this.orange, [0, 1.71, -0.2], [0.85, 0.07, 0.65]);
     this.auraRing = this.mesh(this.character, this.torus, this.itemMaterials.magnet, [0, 0.95, 0], [1, 1, 1]);
     this.auraRing.visible = false;
+    this.pickupRing = this.mesh(this.character, this.torus, this.gold, [0, 1.0, 0.25], [1, 1, 1]);
+    this.pickupRing.visible = false;
     for (const side of [-1, 1]) {
       const arm = new THREE.Group();
       arm.position.set(side * 0.39, 1.2, 0);
@@ -397,7 +400,13 @@ export class TowerScene {
         const passedAndCollected = rowIndex < state.lastProcessedRow && coin.lane === state.lane;
         mesh.visible = !collected && !passedAndCollected;
         if (mesh.visible) {
-          mesh.position.set(laneToX(coin.lane), 0.95 + coin.offsetMm / 1000, 2.88);
+          let coinX = laneToX(coin.lane);
+          const coinWorldY = rowY + coin.offsetMm / 1000;
+          if (state.items.magnet > 0 && coinWorldY > -1.5 && coinWorldY < 7.5) {
+            const pull = 1 - Math.max(0, Math.min(1, coinWorldY / 7.5));
+            coinX = coinX + (state.x - coinX) * pull * 0.85;
+          }
+          mesh.position.set(coinX, 0.95 + coin.offsetMm / 1000, 2.88);
           mesh.rotation.z = tSeconds * 3.8 + cIdx;
         }
       });
@@ -458,6 +467,18 @@ export class TowerScene {
       this.auraRing.rotation.z = t * 4;
     } else {
       this.auraRing.visible = false;
+    }
+
+    // Item pickup burst effect ring
+    if (state.pickupEffectSteps > 0 && state.lastPickedItem) {
+      const progress = 1 - state.pickupEffectSteps / CONFIG.itemPickupEffectSteps;
+      const scale = 0.8 + progress * 1.45;
+      this.pickupRing.visible = true;
+      this.pickupRing.material = this.itemMaterials[state.lastPickedItem];
+      this.pickupRing.scale.set(scale, scale, 1);
+      this.pickupRing.rotation.z = -t * 6;
+    } else {
+      this.pickupRing.visible = false;
     }
 
     for (let i = 0; i < 2; i++) {

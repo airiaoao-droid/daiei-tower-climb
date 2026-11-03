@@ -436,6 +436,18 @@ export default function App() {
         </aside>
       )}
 
+      {running && snapshot.pickupEffectSteps > 0 && snapshot.lastPickedItem && (
+        <div
+          className="pickup-toast"
+          role="status"
+          style={{ borderColor: ITEM_META[snapshot.lastPickedItem].color }}
+        >
+          <span>{ITEM_META[snapshot.lastPickedItem].icon}</span>
+          <b>{ITEM_META[snapshot.lastPickedItem].label} GET!</b>
+          <small>10.0秒間発動</small>
+        </div>
+      )}
+
       {running && (snapshot.windDirection !== 0 || snapshot.windWarningDirection !== 0) && (
         <div className={`wind-banner ${snapshot.windDirection !== 0 ? 'is-active' : ''}`}>
           <span>

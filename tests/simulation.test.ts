@@ -5,16 +5,19 @@ import {
   actionForSwipe,
   activateItem,
   collectCoin,
+  computeClimbSpeedMm,
   computeScore,
   createPlayState,
   createState,
   FixedClock,
   getCourseRow,
   getJstWeekId,
+  ITEM_TYPES,
   moduleY,
   seedFromCourseId,
   step,
   type Action,
+  type ItemType,
 } from '../src/game/simulation';
 import {
   buildAutoPilotRun,
@@ -25,11 +28,13 @@ import {
 
 const running = () => ({ ...createState(), status: 'running' as const });
 
-describe('Phase 1-8 deterministic climbing, hazards, items, and ranking verification', () => {
-  it('climbs upwards at 4.2 m/s initially without moving render origin', () => {
+describe('Daiei Tower Climb: +20% speed update, 4 special items, and deterministic ranking verification', () => {
+  it('increases initial climb speed by 20% (from 4.20 m/s to 5.04 m/s) without moving render origin', () => {
+    expect(CONFIG.legacyBaseClimbMmPerStep).toBe(70);
+    expect(CONFIG.climbMmPerStep).toBe(84); // +20%
     const state = running();
     for (let i = 0; i < 600; i++) step(state);
-    expect(state.altitudeMm).toBe(42000);
+    expect(state.altitudeMm).toBe(50_400); // 50.4m in 10s (5.04 m/s)
     expect(state.tick).toBe(600);
   });
 
@@ -47,7 +52,7 @@ describe('Phase 1-8 deterministic climbing, hazards, items, and ranking verifica
     expect(state.items.magnet).toBe(CONFIG.itemDurationSteps);
   });
 
-  it.each([30, 60, 90, 120, 144])('matches replay at %i rendering FPS', fps => {
+  it.each([30, 60, 90, 120, 144])('matches replay at %i rendering FPS regardless of frame rate', fps => {
     const state = createPlayState('2026-11-02');
     const clock = new FixedClock();
     const actions = new Map<number, Action[]>([
@@ -118,7 +123,7 @@ describe('Phase 1-8 deterministic climbing, hazards, items, and ranking verifica
     const state = running();
     const keys = Object.keys(state);
     for (let i = 0; i < 60 * 60 * 60 * 6; i++) step(state);
-    expect(state.altitudeMm).toBe(90_720_000);
+    expect(state.altitudeMm).toBe(CONFIG.climbMmPerStep * 60 * 60 * 60 * 6);
     expect(Object.keys(state)).toEqual(keys);
     expect(Number.isSafeInteger(state.altitudeMm)).toBe(true);
   });
@@ -136,43 +141,87 @@ describe('Phase 1-8 deterministic climbing, hazards, items, and ranking verifica
     expect(actionForSwipe(10, 80)).toBe('slide');
   });
 
-  it('calculates score as effective coins * integer altitude meters and prevents duplicate coin pickup', () => {
-    expect(computeScore(50, 300_999)).toBe(15_000);
-    const state = createPlayState('2026-11-02');
-    // Row 1 has a coin on lane 1 at 12,000mm
-    while (state.altitudeMm < 14_000 && state.status === 'running') {
-      step(state);
+  it('spawns all 4 special items in early rows on collectible safe lanes and allows actual pickup during play', () => {
+    const seed = seedFromCourseId('2026-11-02');
+    const earlyItems = CONFIG.itemEarlyShowcaseRows.map(r => getCourseRow(seed, r).item);
+    expect(earlyItems.map(item => item?.type)).toEqual(['magnet', 'double', 'slow', 'high_jump']);
+    for (const r of CONFIG.itemEarlyShowcaseRows) {
+      const row = getCourseRow(seed, r);
+      expect(row.item?.lane).toBe(row.safeLane);
     }
-    expect(state.coins).toBe(1);
-    expect(state.effectiveCoins).toBe(1);
+
+    // Play through the first 95m following safeLane and verify all 4 items are actually collected
+    const state = createPlayState('2026-11-02');
+    const picked = new Set<ItemType>();
+    for (let t = 0; t < 2400 && state.altitudeMm < 95_000 && state.status === 'running'; t++) {
+      const nextRowIdx = Math.max(
+        1,
+        Math.floor((state.altitudeMm + CONFIG.rowSpacingMm - CONFIG.collisionHalfDepthMm - 300) / CONFIG.rowSpacingMm)
+      );
+      const nextRow = getCourseRow(state.courseSeed, nextRowIdx);
+      const actions: Action[] = [];
+      if (state.laneSteps === 0 && state.lane !== nextRow.safeLane) {
+        actions.push(nextRow.safeLane < state.lane ? 'left' : 'right');
+      }
+      const dist = nextRow.altitudeMm - state.altitudeMm;
+      if (
+        nextRow.safeAction !== 'none' &&
+        (state.motion === 'climb' || state.motion === 'land') &&
+        dist > 0 &&
+        dist <= state.speedMmPerStep * 16
+      ) {
+        actions.push(nextRow.safeAction);
+      }
+      step(state, actions);
+      if (state.lastEvent === 'item' && state.lastPickedItem) {
+        picked.add(state.lastPickedItem);
+      }
+    }
+    expect(picked).toEqual(new Set<ItemType>(ITEM_TYPES));
   });
 
-  it('runs all 4 special items for exactly 10 seconds (600 ticks), refreshes on re-pickup, and supports simultaneous items', () => {
+  it('verifies each of the 4 special item effects, 10s duration, re-pickup refresh, and 2x coin score calculation', () => {
+    expect(computeScore(50, 300_999)).toBe(15_000);
     const state = running();
+
+    // 1. Magnet & 2. Double coin
     activateItem(state, 'magnet');
     activateItem(state, 'double');
-    activateItem(state, 'slow');
-    activateItem(state, 'high_jump');
     expect(state.items.magnet).toBe(600);
     expect(state.items.double).toBe(600);
+    expect(state.pickupEffectSteps).toBe(CONFIG.itemPickupEffectSteps);
 
-    // Double coin doubles effectiveCoins
     collectCoin(state, 1);
     expect(state.coins).toBe(1);
-    expect(state.effectiveCoins).toBe(2);
+    expect(state.effectiveCoins).toBe(2); // Doubled!
 
-    for (let i = 0; i < 300; i++) step(state);
+    // 3. Slow motion reduces step speed deterministically
+    const normalSpeed = computeClimbSpeedMm(state.altitudeMm, true, 0);
+    activateItem(state, 'slow');
+    const slowSpeed = computeClimbSpeedMm(state.altitudeMm, true, state.items.slow);
+    expect(slowSpeed).toBeLessThan(normalSpeed);
+
+    // 4. High jump extends jump duration to CONFIG.highJumpSteps
+    activateItem(state, 'high_jump');
+    step(state, ['jump']);
+    expect(state.motion).toBe('jump');
+    expect(state.motionSteps).toBe(CONFIG.highJumpSteps - 1);
+
+    // Advance 299 more steps (total 300 steps = 5.0s)
+    for (let i = 0; i < 299; i++) step(state);
     expect(state.items.magnet).toBe(300);
 
-    // Re-activating refreshes to full 600 steps (10s)
+    // Re-activating refreshes timer back to 600 steps (10.0s)
     activateItem(state, 'magnet');
     expect(state.items.magnet).toBe(600);
 
+    // Advance 600 steps (10.0s) -> all items expire and return to normal state
     for (let i = 0; i < 600; i++) step(state);
     expect(state.items.magnet).toBe(0);
     expect(state.items.double).toBe(0);
     expect(state.items.slow).toBe(0);
     expect(state.items.high_jump).toBe(0);
+    expect(state.speedMmPerStep).toBe(CONFIG.climbMmPerStep);
   });
 
   it('accelerates with altitude and enforces the maximum climb speed cap', () => {
@@ -209,19 +258,16 @@ describe('Phase 1-8 deterministic climbing, hazards, items, and ranking verifica
   });
 
   it('switches weekly course IDs at exactly Monday 00:00 JST', () => {
-    // 2026-11-01 23:59:59 JST = 2026-11-01T14:59:59Z (Sunday night in JST)
     const sunNightJst = Date.parse('2026-11-01T14:59:59Z');
-    // 2026-11-02 00:00:00 JST = 2026-11-01T15:00:00Z (Monday 00:00 in JST)
     const monZeroJst = Date.parse('2026-11-01T15:00:00Z');
     expect(getJstWeekId(sunNightJst)).toBe('2026-10-26');
     expect(getJstWeekId(monZeroJst)).toBe('2026-11-02');
   });
 
-  it('verifies replays on the server, ignores tampered scores, deduplicates runs, and manages top 100 & provisional records', () => {
+  it('verifies replays on the server (including item effects), ignores tampered scores, and manages top 100 & provisional records', () => {
     const courseId = '2026-11-02';
     const run = buildAutoPilotRun(courseId, 1800);
 
-    // Server recalculates score and ignores tampered claimedScore
     const engine = new WeeklyRankingEngine();
     const res1 = engine.submitVerifiedRun(
       {
@@ -232,7 +278,7 @@ describe('Phase 1-8 deterministic climbing, hazards, items, and ranking verifica
         totalTicks: run.totalTicks,
         actions: run.actions,
         claimedScore: 999_999_999,
-        nickname: null, // Unregistered nickname -> provisional private record
+        nickname: null,
       },
       1000
     );
@@ -277,6 +323,6 @@ describe('Phase 1-8 deterministic climbing, hazards, items, and ranking verifica
       ],
     });
     expect(invalidReplay.valid).toBe(false);
-    expect( validateNickname('').valid ).toBe(false);
+    expect(validateNickname('').valid).toBe(false);
   });
 });

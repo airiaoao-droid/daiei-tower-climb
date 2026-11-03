@@ -78,6 +78,8 @@ export interface GameState {
   score: number;
   speedMmPerStep: number;
   items: ActiveItems;
+  lastPickedItem: ItemType | null;
+  pickupEffectSteps: number;
   windDirection: WindDirection;
   windWarningDirection: WindDirection;
   windExposureSteps: number;
@@ -95,7 +97,7 @@ export interface CreateStateOptions {
 
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const ITEM_TYPES: readonly ItemType[] = ['magnet', 'double', 'slow', 'high_jump'];
+export const ITEM_TYPES: readonly ItemType[] = ['magnet', 'double', 'slow', 'high_jump'];
 
 /**
  * Returns the weekly course ID anchored to Monday 00:00:00 JST (UTC+9).
@@ -144,6 +146,37 @@ export function movingLoadX(load: MovingLoadObstacle, tick: number): number {
   return center + Math.sin(phase * Math.PI * 2) * load.amplitudeMeters;
 }
 
+function determineRowItem(courseSeed: number, rowIndex: number, safeLane: 0 | 1 | 2): CourseItem | null {
+  if (rowIndex <= 0) return null;
+
+  // Early beginner showcase: rows 1, 3, 5, 7 guarantee all 4 item types appear in order
+  const earlyIndex = CONFIG.itemEarlyShowcaseRows.indexOf(
+    rowIndex as (typeof CONFIG.itemEarlyShowcaseRows)[number]
+  );
+  if (earlyIndex !== -1) {
+    return {
+      id: rowIndex * 100 + 99,
+      lane: safeLane,
+      type: ITEM_TYPES[earlyIndex % ITEM_TYPES.length],
+      offsetMm: rowIndex === 1 ? -1800 : -2800,
+    };
+  }
+
+  // Subsequent rows: spawn according to configurable interval CONFIG.itemSpawnIntervalRows
+  const interval = Math.max(1, CONFIG.itemSpawnIntervalRows);
+  if (rowIndex > 7 && rowIndex % interval === 0) {
+    const itemType = ITEM_TYPES[hashRow(courseSeed, rowIndex, 13) % ITEM_TYPES.length];
+    return {
+      id: rowIndex * 100 + 99,
+      lane: safeLane,
+      type: itemType,
+      offsetMm: -2800,
+    };
+  }
+
+  return null;
+}
+
 /**
  * Deterministically generates a course row with a guaranteed solvable path.
  * Never blocks all 3 lanes with unavoidable obstacles.
@@ -169,7 +202,7 @@ export function getCourseRow(courseSeed: number, rowIndex: number): CourseRow {
       obstacles: [],
       movingLoad: null,
       coins: rowIndex === 0 ? [] : [{ id: rowIndex * 10 + 1, lane: 1, offsetMm: 0 }],
-      item: null,
+      item: determineRowItem(courseSeed, rowIndex, 1),
       windDirection: 0,
     };
   }
@@ -195,11 +228,9 @@ export function getCourseRow(courseSeed: number, rowIndex: number): CourseRow {
         safeLane: safe,
       };
     } else {
-      // If safeLane is 1, place static obstacles on lanes 0 and 2
       obstacles.push({ lane: 0, type: 'beam_low' }, { lane: 2, type: 'beam_high' });
     }
   } else {
-    // Static obstacles on 1 or 2 lanes; safeLane either has no obstacle or a single jumpable/slidable obstacle
     const safeHasActionObstacle = difficultyTier >= 1 && hashRow(courseSeed, rowIndex, 4) % 4 === 0;
     if (safeHasActionObstacle) {
       const actionType = hashRow(courseSeed, rowIndex, 5) % 2 === 0 ? 'beam_low' : 'beam_high';
@@ -218,26 +249,14 @@ export function getCourseRow(courseSeed: number, rowIndex: number): CourseRow {
     }
   }
 
-  // Place coins along the safe lane (and occasionally adjacent lane)
-  const coins: CourseCoin[] = [
-    { id: rowIndex * 10 + safeLane, lane: safeLane, offsetMm: 0 },
-  ];
+  // Place coins along the safe lane (and bonus coins on adjacent lanes so magnet & 2x shine)
+  const coins: CourseCoin[] = [{ id: rowIndex * 10 + safeLane, lane: safeLane, offsetMm: 0 }];
   const bonusCoinLane = ((safeLane + 1) % 3) as 0 | 1 | 2;
   if (hashRow(courseSeed, rowIndex, 11) % 2 === 0) {
-    coins.push({ id: rowIndex * 10 + bonusCoinLane + 3, lane: bonusCoinLane, offsetMm: 3500 });
+    coins.push({ id: rowIndex * 10 + bonusCoinLane + 3, lane: bonusCoinLane, offsetMm: 3200 });
   }
 
-  // Spawn special item periodically (every ~5-7 rows) on a reachable lane
-  let item: CourseItem | null = null;
-  if (rowIndex >= 3 && hashRow(courseSeed, rowIndex, 12) % 5 === 0) {
-    const itemType = ITEM_TYPES[hashRow(courseSeed, rowIndex, 13) % ITEM_TYPES.length];
-    item = {
-      id: rowIndex * 100 + 99,
-      lane: safeLane,
-      type: itemType,
-      offsetMm: -3200,
-    };
-  }
+  const item = determineRowItem(courseSeed, rowIndex, safeLane);
 
   return {
     rowIndex,
@@ -270,7 +289,7 @@ export function computeClimbSpeedMm(altitudeMm: number, progressive: boolean, sl
     base = Math.min(CONFIG.maxClimbMmPerStep, CONFIG.climbMmPerStep + tiers * CONFIG.accelAddMmPerStep);
   }
   if (slowTicks > 0) {
-    return Math.max(35, Math.floor((base * CONFIG.slowSpeedMultiplierPermille) / 1000));
+    return Math.max(42, Math.floor((base * CONFIG.slowSpeedMultiplierPermille) / 1000));
   }
   return base;
 }
@@ -298,6 +317,8 @@ export function createState(options?: CreateStateOptions): GameState {
     score: 0,
     speedMmPerStep: CONFIG.climbMmPerStep,
     items: { magnet: 0, double: 0, slow: 0, high_jump: 0 },
+    lastPickedItem: null,
+    pickupEffectSteps: 0,
     windDirection: 0,
     windWarningDirection: 0,
     windExposureSteps: 0,
@@ -317,6 +338,8 @@ export function createPlayState(courseId: string = getJstWeekId()): GameState {
 
 export function activateItem(state: GameState, type: ItemType) {
   state.items[type] = CONFIG.itemDurationSteps;
+  state.lastPickedItem = type;
+  state.pickupEffectSteps = CONFIG.itemPickupEffectSteps;
   state.lastEvent = 'item';
 }
 
@@ -364,8 +387,8 @@ function evaluateRowInteractions(state: GameState) {
   state.windDirection = row.windDirection;
   state.windWarningDirection = row.windDirection !== 0 ? row.windDirection : nextRow.windDirection;
 
-  // Wind drift effect: nudges player 1 lane if exposed without counter-steering (never kills by itself, and leaves reaction time before row center)
-  if (state.windDirection !== 0 && Math.abs(state.altitudeMm - row.altitudeMm) > 2800) {
+  // Wind drift effect: nudges player 1 lane if exposed without counter-steering (leaves reaction time before row center)
+  if (state.windDirection !== 0 && Math.abs(state.altitudeMm - row.altitudeMm) > 3000) {
     state.windExposureSteps++;
     if (state.windExposureSteps >= CONFIG.windPushIntervalSteps && state.laneSteps === 0) {
       state.windExposureSteps = 0;
@@ -383,22 +406,22 @@ function evaluateRowInteractions(state: GameState) {
   // Check item pickup
   if (row.item && (state.collectedMask & 1) === 0) {
     const itemAlt = row.altitudeMm + row.item.offsetMm;
-    if (Math.abs(state.altitudeMm - itemAlt) <= CONFIG.collisionHalfDepthMm * 1.4) {
+    if (Math.abs(state.altitudeMm - itemAlt) <= CONFIG.collisionHalfDepthMm * 1.45) {
       const itemX = laneToX(row.item.lane);
-      if (Math.abs(state.x - itemX) <= CONFIG.laneHitThreshold * 1.15) {
+      if (Math.abs(state.x - itemX) <= CONFIG.laneHitThreshold * 1.2) {
         state.collectedMask |= 1;
         activateItem(state, row.item.type);
       }
     }
   }
 
-  // Check coin pickups (with magnet support)
+  // Check coin pickups (with magnet attraction support)
   const pickupRadius = state.items.magnet > 0 ? CONFIG.magnetRadiusMeters : CONFIG.laneHitThreshold * 1.1;
   row.coins.forEach((coin, idx) => {
     const bit = 1 << (idx + 1);
     if ((state.collectedMask & bit) !== 0) return;
     const coinAlt = row.altitudeMm + coin.offsetMm;
-    if (Math.abs(state.altitudeMm - coinAlt) <= CONFIG.collisionHalfDepthMm * 1.35) {
+    if (Math.abs(state.altitudeMm - coinAlt) <= CONFIG.collisionHalfDepthMm * 1.4) {
       const coinX = laneToX(coin.lane);
       if (Math.abs(state.x - coinX) <= pickupRadius) {
         state.collectedMask |= bit;
@@ -473,6 +496,13 @@ export function step(state: GameState, actions: readonly Action[] = []) {
   for (const key of ITEM_TYPES) {
     if (state.items[key] > 0) {
       state.items[key]--;
+    }
+  }
+
+  if (state.pickupEffectSteps > 0) {
+    state.pickupEffectSteps--;
+    if (state.pickupEffectSteps === 0) {
+      state.lastPickedItem = null;
     }
   }
 
