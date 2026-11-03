@@ -149,7 +149,7 @@ export function movingLoadX(load: MovingLoadObstacle, tick: number): number {
 function determineRowItem(courseSeed: number, rowIndex: number, safeLane: 0 | 1 | 2): CourseItem | null {
   if (rowIndex <= 0) return null;
 
-  // Early beginner showcase: rows 1, 3, 5, 7 guarantee all 4 item types appear in order
+  // Early showcase rows (e.g., rows 2, 8, 14, 20 -> 24m, 96m, 168m, 240m) guarantee all 4 item types appear in order
   const earlyIndex = CONFIG.itemEarlyShowcaseRows.indexOf(
     rowIndex as (typeof CONFIG.itemEarlyShowcaseRows)[number]
   );
@@ -158,13 +158,14 @@ function determineRowItem(courseSeed: number, rowIndex: number, safeLane: 0 | 1 
       id: rowIndex * 100 + 99,
       lane: safeLane,
       type: ITEM_TYPES[earlyIndex % ITEM_TYPES.length],
-      offsetMm: rowIndex === 1 ? -1800 : -2800,
+      offsetMm: -2800,
     };
   }
 
-  // Subsequent rows: spawn according to configurable interval CONFIG.itemSpawnIntervalRows
+  // Subsequent rows: spawn according to configurable interval CONFIG.itemSpawnIntervalRows (every 8 rows = 96m)
+  const lastEarlyRow = CONFIG.itemEarlyShowcaseRows[CONFIG.itemEarlyShowcaseRows.length - 1] ?? 0;
   const interval = Math.max(1, CONFIG.itemSpawnIntervalRows);
-  if (rowIndex > 7 && rowIndex % interval === 0) {
+  if (rowIndex > lastEarlyRow && (rowIndex - lastEarlyRow) % interval === 0) {
     const itemType = ITEM_TYPES[hashRow(courseSeed, rowIndex, 13) % ITEM_TYPES.length];
     return {
       id: rowIndex * 100 + 99,

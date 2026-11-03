@@ -29,12 +29,13 @@ import {
 const running = () => ({ ...createState(), status: 'running' as const });
 
 describe('Daiei Tower Climb: +20% speed update, 4 special items, and deterministic ranking verification', () => {
-  it('increases initial climb speed by 20% (from 4.20 m/s to 5.04 m/s) without moving render origin', () => {
+  it('increases initial climb speed by a further 20% (to 101 mm/step = 6.06 m/s) without moving render origin', () => {
     expect(CONFIG.legacyBaseClimbMmPerStep).toBe(70);
-    expect(CONFIG.climbMmPerStep).toBe(84); // +20%
+    expect(CONFIG.previousClimbMmPerStep).toBe(84);
+    expect(CONFIG.climbMmPerStep).toBe(101); // +20% over 84
     const state = running();
     for (let i = 0; i < 600; i++) step(state);
-    expect(state.altitudeMm).toBe(50_400); // 50.4m in 10s (5.04 m/s)
+    expect(state.altitudeMm).toBe(60_600); // 60.6m in 10s (6.06 m/s)
     expect(state.tick).toBe(600);
   });
 
@@ -150,10 +151,10 @@ describe('Daiei Tower Climb: +20% speed update, 4 special items, and determinist
       expect(row.item?.lane).toBe(row.safeLane);
     }
 
-    // Play through the first 95m following safeLane and verify all 4 items are actually collected
+    // Play through the first 250m following safeLane and verify all 4 items are actually collected
     const state = createPlayState('2026-11-02');
     const picked = new Set<ItemType>();
-    for (let t = 0; t < 2400 && state.altitudeMm < 95_000 && state.status === 'running'; t++) {
+    for (let t = 0; t < 4500 && state.altitudeMm < 250_000 && state.status === 'running'; t++) {
       const nextRowIdx = Math.max(
         1,
         Math.floor((state.altitudeMm + CONFIG.rowSpacingMm - CONFIG.collisionHalfDepthMm - 300) / CONFIG.rowSpacingMm)
