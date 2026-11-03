@@ -1,38 +1,488 @@
 import { CONFIG } from './config';
+
 export type Action = 'left' | 'right' | 'jump' | 'slide';
-export type Status = 'ready' | 'running' | 'paused';
-export type Motion = 'climb' | 'jump' | 'slide';
+export type Status = 'ready' | 'running' | 'paused' | 'gameover';
+export type Motion = 'climb' | 'jump' | 'slide' | 'land' | 'hit';
+export type ObstacleType = 'beam_low' | 'beam_high' | 'missing_foothold' | 'moving_load';
+export type ItemType = 'magnet' | 'double' | 'slow' | 'high_jump';
+export type WindDirection = -1 | 0 | 1;
+export type GameEvent = 'coin' | 'item' | 'jump' | 'land' | 'lane' | 'gameover';
+
+export interface ReplayAction {
+  tick: number;
+  action: Action;
+}
+
+export interface LaneObstacle {
+  lane: 0 | 1 | 2;
+  type: Exclude<ObstacleType, 'moving_load'>;
+}
+
+export interface MovingLoadObstacle {
+  type: 'moving_load';
+  centerLane: 0 | 1 | 2;
+  amplitudeMeters: number;
+  periodTicks: number;
+  phaseTicks: number;
+  safeLane: 0 | 1 | 2;
+}
+
+export interface CourseCoin {
+  id: number;
+  lane: 0 | 1 | 2;
+  offsetMm: number;
+}
+
+export interface CourseItem {
+  id: number;
+  lane: 0 | 1 | 2;
+  type: ItemType;
+  offsetMm: number;
+}
+
+export interface CourseRow {
+  rowIndex: number;
+  altitudeMm: number;
+  safeLane: 0 | 1 | 2;
+  safeAction: 'none' | 'jump' | 'slide';
+  obstacles: LaneObstacle[];
+  movingLoad: MovingLoadObstacle | null;
+  coins: CourseCoin[];
+  item: CourseItem | null;
+  windDirection: WindDirection;
+}
+
+export interface ActiveItems {
+  magnet: number;
+  double: number;
+  slow: number;
+  high_jump: number;
+}
+
 export interface GameState {
-  status: Status; tick: number; altitudeMm: number; lane: number;
-  fromX: number; x: number; laneSteps: number; motion: Motion; motionSteps: number;
+  status: Status;
+  tick: number;
+  altitudeMm: number;
+  lane: number;
+  fromX: number;
+  x: number;
+  laneSteps: number;
+  motion: Motion;
+  motionSteps: number;
+  courseId: string;
+  courseSeed: number;
+  hazardsEnabled: boolean;
+  progressiveSpeed: boolean;
+  coins: number;
+  effectiveCoins: number;
+  score: number;
+  speedMmPerStep: number;
+  items: ActiveItems;
+  windDirection: WindDirection;
+  windWarningDirection: WindDirection;
+  windExposureSteps: number;
+  lastProcessedRow: number;
+  collectedMask: number;
+  failReason: ObstacleType | null;
+  lastEvent: GameEvent | null;
 }
-export function createState(): GameState {
-  return { status: 'ready', tick: 0, altitudeMm: 0, lane: 1, fromX: 0, x: 0, laneSteps: 0, motion: 'climb', motionSteps: 0 };
+
+export interface CreateStateOptions {
+  courseId?: string;
+  hazardsEnabled?: boolean;
+  progressiveSpeed?: boolean;
 }
+
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const ITEM_TYPES: readonly ItemType[] = ['magnet', 'double', 'slow', 'high_jump'];
+
+/**
+ * Returns the weekly course ID anchored to Monday 00:00:00 JST (UTC+9).
+ * Format: "YYYY-MM-DD" of the Monday starting that JST week.
+ */
+export function getJstWeekId(nowMs: number = Date.now()): string {
+  const jstMs = nowMs + JST_OFFSET_MS;
+  const jstDate = new Date(jstMs);
+  const utcDay = jstDate.getUTCDay(); // 0 = Sun, 1 = Mon, ..., 6 = Sat
+  const daysSinceMonday = (utcDay + 6) % 7;
+  const mondayJstMs = jstMs - daysSinceMonday * DAY_MS;
+  const monday = new Date(mondayJstMs);
+  const y = monday.getUTCFullYear();
+  const m = String(monday.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(monday.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function seedFromCourseId(courseId: string): number {
+  let h = 2166136261 >>> 0;
+  const input = `${CONFIG.ruleVersion}:${courseId}`;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function hashRow(seed: number, rowIndex: number, salt: number): number {
+  let x = (seed ^ Math.imul(rowIndex + 1, 0x9e3779b1) ^ Math.imul(salt + 1, 0x85ebca6b)) >>> 0;
+  x ^= x >>> 16;
+  x = Math.imul(x, 0x7feb352d) >>> 0;
+  x ^= x >>> 15;
+  x = Math.imul(x, 0x846ca68b) >>> 0;
+  x ^= x >>> 16;
+  return x >>> 0;
+}
+
+export function laneToX(lane: number): number {
+  return (lane - 1) * CONFIG.laneWidth;
+}
+
+export function movingLoadX(load: MovingLoadObstacle, tick: number): number {
+  const center = laneToX(load.centerLane);
+  const phase = ((tick + load.phaseTicks) % load.periodTicks) / load.periodTicks;
+  return center + Math.sin(phase * Math.PI * 2) * load.amplitudeMeters;
+}
+
+/**
+ * Deterministically generates a course row with a guaranteed solvable path.
+ * Never blocks all 3 lanes with unavoidable obstacles.
+ */
+export function getCourseRow(courseSeed: number, rowIndex: number): CourseRow {
+  const altitudeMm = rowIndex * CONFIG.rowSpacingMm;
+  const safeLane = (hashRow(courseSeed, rowIndex, 1) % 3) as 0 | 1 | 2;
+
+  const windActive =
+    altitudeMm >= CONFIG.windStartAltitudeMm && hashRow(courseSeed, Math.floor(rowIndex / 3), 9) % 3 === 0;
+  const windDirection: WindDirection = windActive
+    ? hashRow(courseSeed, Math.floor(rowIndex / 3), 10) % 2 === 0
+      ? -1
+      : 1
+    : 0;
+
+  if (rowIndex < CONFIG.firstHazardRow) {
+    return {
+      rowIndex,
+      altitudeMm,
+      safeLane: 1,
+      safeAction: 'none',
+      obstacles: [],
+      movingLoad: null,
+      coins: rowIndex === 0 ? [] : [{ id: rowIndex * 10 + 1, lane: 1, offsetMm: 0 }],
+      item: null,
+      windDirection: 0,
+    };
+  }
+
+  const difficultyTier = Math.min(4, Math.floor(altitudeMm / 120_000));
+  const pattern = hashRow(courseSeed, rowIndex, 2) % 10;
+  const obstacles: LaneObstacle[] = [];
+  let movingLoad: MovingLoadObstacle | null = null;
+  let safeAction: 'none' | 'jump' | 'slide' = 'none';
+
+  if (pattern <= 2 && rowIndex >= 3) {
+    // Moving load row: sweeps across two lanes while leaving safeLane completely clear
+    const safe = safeLane;
+    const centerLane: 0 | 1 | 2 = safe === 0 ? 2 : safe === 2 ? 0 : 1;
+    const amplitudeMeters = safe === 1 ? 0 : 1.35;
+    if (safe !== 1) {
+      movingLoad = {
+        type: 'moving_load',
+        centerLane,
+        amplitudeMeters,
+        periodTicks: Math.max(72, 130 - difficultyTier * 12),
+        phaseTicks: hashRow(courseSeed, rowIndex, 3) % 120,
+        safeLane: safe,
+      };
+    } else {
+      // If safeLane is 1, place static obstacles on lanes 0 and 2
+      obstacles.push({ lane: 0, type: 'beam_low' }, { lane: 2, type: 'beam_high' });
+    }
+  } else {
+    // Static obstacles on 1 or 2 lanes; safeLane either has no obstacle or a single jumpable/slidable obstacle
+    const safeHasActionObstacle = difficultyTier >= 1 && hashRow(courseSeed, rowIndex, 4) % 4 === 0;
+    if (safeHasActionObstacle) {
+      const actionType = hashRow(courseSeed, rowIndex, 5) % 2 === 0 ? 'beam_low' : 'beam_high';
+      safeAction = actionType === 'beam_low' ? 'jump' : 'slide';
+      obstacles.push({ lane: safeLane, type: actionType });
+    }
+
+    const otherLanes = ([0, 1, 2] as const).filter(l => l !== safeLane);
+    const hazardCount = difficultyTier >= 1 || hashRow(courseSeed, rowIndex, 6) % 2 === 0 ? 2 : 1;
+    const types: Exclude<ObstacleType, 'moving_load'>[] = ['beam_low', 'beam_high', 'missing_foothold'];
+
+    for (let i = 0; i < hazardCount; i++) {
+      const lane = otherLanes[i];
+      const tIndex = hashRow(courseSeed, rowIndex, 7 + i) % types.length;
+      obstacles.push({ lane, type: types[tIndex] });
+    }
+  }
+
+  // Place coins along the safe lane (and occasionally adjacent lane)
+  const coins: CourseCoin[] = [
+    { id: rowIndex * 10 + safeLane, lane: safeLane, offsetMm: 0 },
+  ];
+  const bonusCoinLane = ((safeLane + 1) % 3) as 0 | 1 | 2;
+  if (hashRow(courseSeed, rowIndex, 11) % 2 === 0) {
+    coins.push({ id: rowIndex * 10 + bonusCoinLane + 3, lane: bonusCoinLane, offsetMm: 3500 });
+  }
+
+  // Spawn special item periodically (every ~5-7 rows) on a reachable lane
+  let item: CourseItem | null = null;
+  if (rowIndex >= 3 && hashRow(courseSeed, rowIndex, 12) % 5 === 0) {
+    const itemType = ITEM_TYPES[hashRow(courseSeed, rowIndex, 13) % ITEM_TYPES.length];
+    item = {
+      id: rowIndex * 100 + 99,
+      lane: safeLane,
+      type: itemType,
+      offsetMm: -3200,
+    };
+  }
+
+  return {
+    rowIndex,
+    altitudeMm,
+    safeLane,
+    safeAction,
+    obstacles,
+    movingLoad,
+    coins,
+    item,
+    windDirection,
+  };
+}
+
+export function computeScore(effectiveCoins: number, altitudeMm: number): number {
+  const coins = Math.max(0, Math.floor(effectiveCoins));
+  const altitudeMeters = Math.max(0, Math.floor(altitudeMm / 1000));
+  if (coins === 0 || altitudeMeters === 0) return 0;
+  const raw = coins * altitudeMeters;
+  if (!Number.isFinite(raw) || raw > Number.MAX_SAFE_INTEGER) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return raw;
+}
+
+export function computeClimbSpeedMm(altitudeMm: number, progressive: boolean, slowTicks: number): number {
+  let base: number = CONFIG.climbMmPerStep;
+  if (progressive) {
+    const tiers = Math.floor(Math.max(0, altitudeMm) / CONFIG.accelIntervalMm);
+    base = Math.min(CONFIG.maxClimbMmPerStep, CONFIG.climbMmPerStep + tiers * CONFIG.accelAddMmPerStep);
+  }
+  if (slowTicks > 0) {
+    return Math.max(35, Math.floor((base * CONFIG.slowSpeedMultiplierPermille) / 1000));
+  }
+  return base;
+}
+
+export function createState(options?: CreateStateOptions): GameState {
+  const courseId = options?.courseId ?? getJstWeekId();
+  const hazardsEnabled = options?.hazardsEnabled ?? false;
+  const progressiveSpeed = options?.progressiveSpeed ?? hazardsEnabled;
+  return {
+    status: 'ready',
+    tick: 0,
+    altitudeMm: 0,
+    lane: 1,
+    fromX: 0,
+    x: 0,
+    laneSteps: 0,
+    motion: 'climb',
+    motionSteps: 0,
+    courseId,
+    courseSeed: seedFromCourseId(courseId),
+    hazardsEnabled,
+    progressiveSpeed,
+    coins: 0,
+    effectiveCoins: 0,
+    score: 0,
+    speedMmPerStep: CONFIG.climbMmPerStep,
+    items: { magnet: 0, double: 0, slow: 0, high_jump: 0 },
+    windDirection: 0,
+    windWarningDirection: 0,
+    windExposureSteps: 0,
+    lastProcessedRow: -1,
+    collectedMask: 0,
+    failReason: null,
+    lastEvent: null,
+  };
+}
+
+export function createPlayState(courseId: string = getJstWeekId()): GameState {
+  return {
+    ...createState({ courseId, hazardsEnabled: true, progressiveSpeed: true }),
+    status: 'running',
+  };
+}
+
+export function activateItem(state: GameState, type: ItemType) {
+  state.items[type] = CONFIG.itemDurationSteps;
+  state.lastEvent = 'item';
+}
+
+export function collectCoin(state: GameState, count = 1) {
+  const gained = Math.max(1, Math.floor(count));
+  const multiplier = state.items.double > 0 ? 2 : 1;
+  state.coins += gained;
+  state.effectiveCoins += gained * multiplier;
+  state.score = computeScore(state.effectiveCoins, state.altitudeMm);
+  state.lastEvent = 'coin';
+}
+
 export function applyAction(state: GameState, action: Action) {
   if (state.status !== 'running') return;
   if (action === 'left' || action === 'right') {
     if (state.laneSteps > 0) return;
     const target = Math.max(0, Math.min(2, state.lane + (action === 'left' ? -1 : 1)));
     if (target === state.lane) return;
-    state.fromX = state.x; state.lane = target; state.laneSteps = CONFIG.laneChangeSteps;
-  } else if (state.motion === 'climb') {
+    state.fromX = state.x;
+    state.lane = target;
+    state.laneSteps = CONFIG.laneChangeSteps;
+    state.windExposureSteps = 0;
+    state.lastEvent = 'lane';
+  } else if (state.motion === 'climb' || state.motion === 'land') {
     state.motion = action;
-    state.motionSteps = action === 'jump' ? CONFIG.jumpSteps : CONFIG.slideSteps;
+    state.motionSteps =
+      action === 'jump'
+        ? state.items.high_jump > 0
+          ? CONFIG.highJumpSteps
+          : CONFIG.jumpSteps
+        : CONFIG.slideSteps;
+    if (action === 'jump') state.lastEvent = 'jump';
   }
 }
+
+function evaluateRowInteractions(state: GameState) {
+  const currentRowIdx = Math.round(state.altitudeMm / CONFIG.rowSpacingMm);
+  if (currentRowIdx !== state.lastProcessedRow) {
+    state.lastProcessedRow = currentRowIdx;
+    state.collectedMask = 0;
+  }
+
+  const row = getCourseRow(state.courseSeed, currentRowIdx);
+  const nextRow = getCourseRow(state.courseSeed, currentRowIdx + 1);
+  state.windDirection = row.windDirection;
+  state.windWarningDirection = row.windDirection !== 0 ? row.windDirection : nextRow.windDirection;
+
+  // Wind drift effect: nudges player 1 lane if exposed without counter-steering (never kills by itself, and leaves reaction time before row center)
+  if (state.windDirection !== 0 && Math.abs(state.altitudeMm - row.altitudeMm) > 2800) {
+    state.windExposureSteps++;
+    if (state.windExposureSteps >= CONFIG.windPushIntervalSteps && state.laneSteps === 0) {
+      state.windExposureSteps = 0;
+      const pushedLane = Math.max(0, Math.min(2, state.lane + state.windDirection));
+      if (pushedLane !== state.lane) {
+        state.fromX = state.x;
+        state.lane = pushedLane;
+        state.laneSteps = CONFIG.laneChangeSteps;
+      }
+    }
+  } else if (state.windDirection === 0) {
+    state.windExposureSteps = 0;
+  }
+
+  // Check item pickup
+  if (row.item && (state.collectedMask & 1) === 0) {
+    const itemAlt = row.altitudeMm + row.item.offsetMm;
+    if (Math.abs(state.altitudeMm - itemAlt) <= CONFIG.collisionHalfDepthMm * 1.4) {
+      const itemX = laneToX(row.item.lane);
+      if (Math.abs(state.x - itemX) <= CONFIG.laneHitThreshold * 1.15) {
+        state.collectedMask |= 1;
+        activateItem(state, row.item.type);
+      }
+    }
+  }
+
+  // Check coin pickups (with magnet support)
+  const pickupRadius = state.items.magnet > 0 ? CONFIG.magnetRadiusMeters : CONFIG.laneHitThreshold * 1.1;
+  row.coins.forEach((coin, idx) => {
+    const bit = 1 << (idx + 1);
+    if ((state.collectedMask & bit) !== 0) return;
+    const coinAlt = row.altitudeMm + coin.offsetMm;
+    if (Math.abs(state.altitudeMm - coinAlt) <= CONFIG.collisionHalfDepthMm * 1.35) {
+      const coinX = laneToX(coin.lane);
+      if (Math.abs(state.x - coinX) <= pickupRadius) {
+        state.collectedMask |= bit;
+        collectCoin(state, 1);
+      }
+    }
+  });
+
+  // Check obstacle collisions around the row center altitude
+  if (Math.abs(state.altitudeMm - row.altitudeMm) <= CONFIG.collisionHalfDepthMm) {
+    const jumping = state.motion === 'jump';
+    const sliding = state.motion === 'slide';
+    const highJumping = jumping && state.items.high_jump > 0;
+
+    for (const obs of row.obstacles) {
+      const obsX = laneToX(obs.lane);
+      if (Math.abs(state.x - obsX) <= CONFIG.laneHitThreshold) {
+        const avoided =
+          (obs.type === 'beam_low' && jumping) ||
+          (obs.type === 'beam_high' && (sliding || highJumping)) ||
+          (obs.type === 'missing_foothold' && jumping);
+        if (!avoided) {
+          state.status = 'gameover';
+          state.motion = 'hit';
+          state.failReason = obs.type;
+          state.lastEvent = 'gameover';
+          return;
+        }
+      }
+    }
+
+    if (row.movingLoad) {
+      const loadX = movingLoadX(row.movingLoad, state.tick);
+      if (Math.abs(state.x - loadX) <= CONFIG.laneHitThreshold * 0.95 && !highJumping) {
+        state.status = 'gameover';
+        state.motion = 'hit';
+        state.failReason = 'moving_load';
+        state.lastEvent = 'gameover';
+        return;
+      }
+    }
+  }
+}
+
 export function step(state: GameState, actions: readonly Action[] = []) {
   if (state.status !== 'running') return;
+  state.lastEvent = null;
   for (const action of actions) applyAction(state, action);
+
+  const climbStep = computeClimbSpeedMm(state.altitudeMm, state.progressiveSpeed, state.items.slow);
+  state.speedMmPerStep = climbStep;
   state.tick++;
-  state.altitudeMm += CONFIG.climbMmPerStep;
+  state.altitudeMm += climbStep;
+
   if (state.laneSteps > 0) {
     state.laneSteps--;
     const t = 1 - state.laneSteps / CONFIG.laneChangeSteps;
     state.x = state.fromX + ((state.lane - 1) * CONFIG.laneWidth - state.fromX) * t * t * (3 - 2 * t);
   }
-  if (state.motionSteps > 0 && --state.motionSteps === 0) state.motion = 'climb';
+
+  if (state.motionSteps > 0 && --state.motionSteps === 0) {
+    if (state.motion === 'jump' && state.hazardsEnabled) {
+      state.motion = 'land';
+      state.motionSteps = CONFIG.landSteps;
+      state.lastEvent = 'land';
+    } else {
+      state.motion = 'climb';
+    }
+  }
+
+  // Decrement active item timers (10s = 600 steps)
+  for (const key of ITEM_TYPES) {
+    if (state.items[key] > 0) {
+      state.items[key]--;
+    }
+  }
+
+  if (state.hazardsEnabled) {
+    evaluateRowInteractions(state);
+  }
+
+  state.score = computeScore(state.effectiveCoins, state.altitudeMm);
 }
+
 // Fixed-step accumulator: render rate never enters the game rules.
 // Time above 250ms is intentionally discarded, preventing a catch-up jump after a stall.
 export class FixedClock {
@@ -41,23 +491,42 @@ export class FixedClock {
     this.accumulated += Math.max(0, Math.min(CONFIG.maxCatchupSeconds, seconds));
     let count = 0;
     while (this.accumulated + 1e-10 >= 1 / CONFIG.stepHz) {
-      update(); this.accumulated -= 1 / CONFIG.stepHz; count++;
+      update();
+      this.accumulated -= 1 / CONFIG.stepHz;
+      count++;
     }
     return count;
   }
-  reset() { this.accumulated = 0; }
+  reset() {
+    this.accumulated = 0;
+  }
 }
+
 // Render coordinates remain small regardless of logical altitude.
 export function moduleY(slot: number, altitudeMeters: number) {
   const current = Math.floor(altitudeMeters / CONFIG.moduleHeight);
   const first = current - CONFIG.modulesBelow;
-  const section = first + ((slot - first) % CONFIG.moduleCount + CONFIG.moduleCount) % CONFIG.moduleCount;
+  const section = first + (((slot - first) % CONFIG.moduleCount) + CONFIG.moduleCount) % CONFIG.moduleCount;
   return (section - current) * CONFIG.moduleHeight - (altitudeMeters % CONFIG.moduleHeight);
 }
+
 export function actionForKey(key: string): Action | undefined {
-  return ({ ArrowLeft: 'left', a: 'left', ArrowRight: 'right', d: 'right', ArrowUp: 'jump', w: 'jump', ' ': 'jump', ArrowDown: 'slide', s: 'slide' } as Record<string, Action>)[key.length === 1 ? key.toLowerCase() : key];
+  return (
+    {
+      ArrowLeft: 'left',
+      a: 'left',
+      ArrowRight: 'right',
+      d: 'right',
+      ArrowUp: 'jump',
+      w: 'jump',
+      ' ': 'jump',
+      ArrowDown: 'slide',
+      s: 'slide',
+    } as Record<string, Action>
+  )[key.length === 1 ? key.toLowerCase() : key];
 }
+
 export function actionForSwipe(dx: number, dy: number): Action | undefined {
   if (Math.max(Math.abs(dx), Math.abs(dy)) < 28) return;
-  return Math.abs(dx) > Math.abs(dy) ? dx < 0 ? 'left' : 'right' : dy < 0 ? 'jump' : 'slide';
+  return Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : dy < 0 ? 'jump' : 'slide';
 }
