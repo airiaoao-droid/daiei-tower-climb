@@ -444,7 +444,7 @@ export default function App() {
         >
           <span>{ITEM_META[snapshot.lastPickedItem].icon}</span>
           <b>{ITEM_META[snapshot.lastPickedItem].label} GET!</b>
-          <small>10.0秒間発動</small>
+          <small>5.0秒間発動</small>
         </div>
       )}
 
@@ -793,7 +793,7 @@ export default function App() {
                   </div>
                 </div>
                 <p className="subtle">
-                  特殊アイテム（マグネット・コイン2倍・スロー・ハイジャンプ）は各10秒間有効です。
+                  特殊アイテム（マグネット・コイン2倍・スロー・ハイジャンプ）は各5秒間有効です。
                 </p>
                 <button
                   className="primary"

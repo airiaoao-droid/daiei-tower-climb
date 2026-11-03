@@ -15,7 +15,7 @@ export const CONFIG = Object.freeze({
   highJumpSteps: 60, // 1.0s at 60Hz during high_jump
   slideSteps: 48, // 0.8s at 60Hz
   landSteps: 8, // Brief landing animation window
-  itemDurationSteps: 600, // 10.0 seconds at 60Hz (600 steps)
+  itemDurationSteps: 300, // 5.0 seconds at 60Hz (300 steps)
   itemEarlyShowcaseRows: [2, 8, 14, 20] as const, // Spaced out: 24m, 96m, 168m, 240m (every 72m)
   itemSpawnIntervalRows: 8, // Reduced frequency: every 8 rows (96m) after row 20
   itemPickupEffectSteps: 36, // 0.6s pickup visual burst duration

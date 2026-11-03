@@ -181,15 +181,15 @@ describe('Daiei Tower Climb: +20% speed update, 4 special items, and determinist
     expect(picked).toEqual(new Set<ItemType>(ITEM_TYPES));
   });
 
-  it('verifies each of the 4 special item effects, 10s duration, re-pickup refresh, and 2x coin score calculation', () => {
+  it('verifies each of the 4 special item effects, 5s duration, re-pickup refresh, and 2x coin score calculation', () => {
     expect(computeScore(50, 300_999)).toBe(15_000);
     const state = running();
 
     // 1. Magnet & 2. Double coin
     activateItem(state, 'magnet');
     activateItem(state, 'double');
-    expect(state.items.magnet).toBe(600);
-    expect(state.items.double).toBe(600);
+    expect(state.items.magnet).toBe(300);
+    expect(state.items.double).toBe(300);
     expect(state.pickupEffectSteps).toBe(CONFIG.itemPickupEffectSteps);
 
     collectCoin(state, 1);
@@ -208,16 +208,16 @@ describe('Daiei Tower Climb: +20% speed update, 4 special items, and determinist
     expect(state.motion).toBe('jump');
     expect(state.motionSteps).toBe(CONFIG.highJumpSteps - 1);
 
-    // Advance 299 more steps (total 300 steps = 5.0s)
-    for (let i = 0; i < 299; i++) step(state);
+    // Advance 149 more steps (total 150 steps = 2.5s)
+    for (let i = 0; i < 149; i++) step(state);
+    expect(state.items.magnet).toBe(150);
+
+    // Re-activating refreshes timer back to 300 steps (5.0s)
+    activateItem(state, 'magnet');
     expect(state.items.magnet).toBe(300);
 
-    // Re-activating refreshes timer back to 600 steps (10.0s)
-    activateItem(state, 'magnet');
-    expect(state.items.magnet).toBe(600);
-
-    // Advance 600 steps (10.0s) -> all items expire and return to normal state
-    for (let i = 0; i < 600; i++) step(state);
+    // Advance 300 steps (5.0s) -> all items expire and return to normal state
+    for (let i = 0; i < 300; i++) step(state);
     expect(state.items.magnet).toBe(0);
     expect(state.items.double).toBe(0);
     expect(state.items.slow).toBe(0);
