@@ -18,8 +18,13 @@ export interface R2BucketLike {
   put(key: string, value: string, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
 }
 
+export interface AssetsFetcherLike {
+  fetch(request: Request): Promise<Response>;
+}
+
 export interface Env {
-  RANKING_BUCKET: R2BucketLike;
+  RANKING_BUCKET?: R2BucketLike;
+  ASSETS?: AssetsFetcherLike;
 }
 
 interface StoredWeekDocument {
@@ -29,6 +34,7 @@ interface StoredWeekDocument {
   records: Record<string, LeaderboardEntry>;
 }
 
+const memoryStore = new Map<string, StoredWeekDocument>();
 const rateLimitWindow = new Map<string, { count: number; resetAt: number }>();
 
 function checkRateLimit(clientKey: string, nowMs: number): boolean {
@@ -72,7 +78,10 @@ function buildView(doc: StoredWeekDocument, playerId?: string): WeeklyLeaderboar
   };
 }
 
-async function loadWeekDoc(bucket: R2BucketLike, weekId: string): Promise<StoredWeekDocument> {
+async function loadWeekDoc(bucket: R2BucketLike | undefined, weekId: string): Promise<StoredWeekDocument> {
+  if (!bucket) {
+    return memoryStore.get(weekId) ?? { weekId, updatedAtMs: Date.now(), processedRunIds: [], records: {} };
+  }
   const key = `daiei-tower-climb/rankings/${weekId}.json`;
   const existing = await bucket.get(key);
   if (!existing) {
@@ -81,9 +90,13 @@ async function loadWeekDoc(bucket: R2BucketLike, weekId: string): Promise<Stored
   return await existing.json<StoredWeekDocument>();
 }
 
-async function saveWeekDoc(bucket: R2BucketLike, doc: StoredWeekDocument): Promise<void> {
-  const key = `daiei-tower-climb/rankings/${doc.weekId}.json`;
+async function saveWeekDoc(bucket: R2BucketLike | undefined, doc: StoredWeekDocument): Promise<void> {
   doc.updatedAtMs = Date.now();
+  if (!bucket) {
+    memoryStore.set(doc.weekId, doc);
+    return;
+  }
+  const key = `daiei-tower-climb/rankings/${doc.weekId}.json`;
   await bucket.put(key, JSON.stringify(doc), {
     httpMetadata: { contentType: 'application/json; charset=utf-8' },
   });
@@ -103,6 +116,15 @@ function jsonResponse(body: unknown, status = 200, setPlayerIdCookie?: string): 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // Serve static frontend assets for all non-API routes
+    if (!url.pathname.startsWith('/api/')) {
+      if (env.ASSETS) {
+        return env.ASSETS.fetch(request);
+      }
+      return new Response('Static assets binding not configured', { status: 404 });
+    }
+
     const nowMs = Date.now();
     const playerId = extractPlayerId(request);
 
