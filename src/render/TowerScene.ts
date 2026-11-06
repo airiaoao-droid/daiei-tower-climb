@@ -225,7 +225,7 @@ export class TowerScene {
     group.add(movingLoadGroup);
 
     const coinMeshes: THREE.Mesh[] = [];
-    for (let c = 0; c < 2; c++) {
+    for (let c = 0; c < 4; c++) {
       const coin = this.mesh(group, this.cylinder, this.gold, [0, 0.95, 2.85], [1, 1, 1]);
       coin.rotation.x = Math.PI / 2;
       coin.visible = false;
@@ -341,10 +341,14 @@ export class TowerScene {
     const { clientWidth: width, clientHeight: height } = this.host;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, PIXEL_RATIO[this.quality]));
     this.renderer.setSize(width, height, false);
-    this.camera.aspect = width / Math.max(1, height);
-    const narrow = width < 700;
-    this.camera.position.set(narrow ? 0 : 1.5, -3, narrow ? 24 : 21);
-    this.camera.lookAt(0, 5.5, 0);
+    const aspect = width / Math.max(1, height);
+    this.camera.aspect = aspect;
+    // Optimized for 9:16 portrait smartphone view so all 3 lanes fit with maximum vertical sightline
+    const portrait = aspect < 0.75;
+    this.camera.fov = portrait ? 54 : 49;
+    const extraZ = portrait ? Math.max(0, (0.58 - aspect) * 20) : 0;
+    this.camera.position.set(0, -2.6, (portrait ? 22.6 : 21) + extraZ);
+    this.camera.lookAt(0, portrait ? 6.2 : 5.5, 0);
     this.camera.updateProjectionMatrix();
   }
 

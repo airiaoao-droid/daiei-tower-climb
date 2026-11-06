@@ -146,14 +146,41 @@ export function movingLoadX(load: MovingLoadObstacle, tick: number): number {
   return center + Math.sin(phase * Math.PI * 2) * load.amplitudeMeters;
 }
 
+/**
+ * Computes a side-to-side weaving safe lane sequence that:
+ * 1. Guides beginners gently in rows 1-5 (1 -> 1 -> 2 -> 1 -> 0)
+ * 2. Actively alternates left/center/right in higher rows so the player never stays idle in one lane
+ * 3. Frequently passes through or visits the center lane (lane 1)
+ */
+function computeWeavingSafeLane(courseSeed: number, rowIndex: number): 0 | 1 | 2 {
+  if (rowIndex <= 2) return 1;
+  if (rowIndex === 3) return 2;
+  if (rowIndex === 4) return 1;
+  if (rowIndex === 5) return 0;
+
+  // Deterministic 8-step weaving cycle per chunk so consecutive rows always change lanes
+  // while visiting center lane (1) and alternating left (0) / right (2)
+  const cycles: readonly (readonly (0 | 1 | 2)[])[] = [
+    [1, 0, 1, 2, 0, 1, 2, 1],
+    [1, 2, 1, 0, 2, 1, 0, 1],
+    [1, 0, 2, 1, 0, 2, 1, 2],
+    [1, 2, 0, 1, 2, 0, 1, 0],
+  ];
+  const chunkIdx = Math.floor(rowIndex / 8);
+  const stepInChunk = rowIndex % 8;
+  const cycle = cycles[hashRow(courseSeed, chunkIdx, 1) % cycles.length];
+  return cycle[stepInChunk];
+}
+
 function determineRowItem(courseSeed: number, rowIndex: number, safeLane: 0 | 1 | 2): CourseItem | null {
   if (rowIndex <= 0) return null;
 
-  // Early showcase rows (e.g., rows 2, 8, 14, 20 -> 24m, 96m, 168m, 240m) guarantee all 4 item types appear in order
+  // Early showcase rows (2, 8, 14, 20 -> 24m, 96m, 168m, 240m) guarantee all 4 item types appear in order
   const earlyIndex = CONFIG.itemEarlyShowcaseRows.indexOf(
     rowIndex as (typeof CONFIG.itemEarlyShowcaseRows)[number]
   );
   if (earlyIndex !== -1) {
+    // Prefer center lane if safeLane is center, or place at -3000mm on safeLane so it's 100% reachable
     return {
       id: rowIndex * 100 + 99,
       lane: safeLane,
@@ -179,12 +206,13 @@ function determineRowItem(courseSeed: number, rowIndex: number, safeLane: 0 | 1 
 }
 
 /**
- * Deterministically generates a course row with a guaranteed solvable path.
- * Never blocks all 3 lanes with unavoidable obstacles.
+ * Deterministically generates a course row with a guaranteed solvable path,
+ * increased center-lane coins/items, and side-to-side weaving layout.
  */
 export function getCourseRow(courseSeed: number, rowIndex: number): CourseRow {
   const altitudeMm = rowIndex * CONFIG.rowSpacingMm;
-  const safeLane = (hashRow(courseSeed, rowIndex, 1) % 3) as 0 | 1 | 2;
+  const safeLane = computeWeavingSafeLane(courseSeed, rowIndex);
+  const prevSafeLane = rowIndex > 0 ? computeWeavingSafeLane(courseSeed, rowIndex - 1) : 1;
 
   const windActive =
     altitudeMm >= CONFIG.windStartAltitudeMm && hashRow(courseSeed, Math.floor(rowIndex / 3), 9) % 3 === 0;
@@ -202,59 +230,110 @@ export function getCourseRow(courseSeed: number, rowIndex: number): CourseRow {
       safeAction: 'none',
       obstacles: [],
       movingLoad: null,
-      coins: rowIndex === 0 ? [] : [{ id: rowIndex * 10 + 1, lane: 1, offsetMm: 0 }],
+      coins:
+        rowIndex === 0
+          ? []
+          : [
+              { id: rowIndex * 10 + 1, lane: 1, offsetMm: -2400 },
+              { id: rowIndex * 10 + 2, lane: 1, offsetMm: 0 },
+              { id: rowIndex * 10 + 3, lane: 1, offsetMm: 2400 },
+            ],
       item: determineRowItem(courseSeed, rowIndex, 1),
       windDirection: 0,
     };
   }
 
-  const difficultyTier = Math.min(4, Math.floor(altitudeMm / 120_000));
-  const pattern = hashRow(courseSeed, rowIndex, 2) % 10;
+  const difficultyTier = Math.min(5, Math.floor(altitudeMm / 96_000));
   const obstacles: LaneObstacle[] = [];
   let movingLoad: MovingLoadObstacle | null = null;
   let safeAction: 'none' | 'jump' | 'slide' = 'none';
 
-  if (pattern <= 2 && rowIndex >= 3) {
-    // Moving load row: sweeps across two lanes while leaving safeLane completely clear
-    const safe = safeLane;
-    const centerLane: 0 | 1 | 2 = safe === 0 ? 2 : safe === 2 ? 0 : 1;
-    const amplitudeMeters = safe === 1 ? 0 : 1.35;
-    if (safe !== 1) {
-      movingLoad = {
-        type: 'moving_load',
-        centerLane,
-        amplitudeMeters,
-        periodTicks: Math.max(72, 130 - difficultyTier * 12),
-        phaseTicks: hashRow(courseSeed, rowIndex, 3) % 120,
-        safeLane: safe,
-      };
-    } else {
-      obstacles.push({ lane: 0, type: 'beam_low' }, { lane: 2, type: 'beam_high' });
+  // Early onboarding rows (rows 2 to 5): teach lane change, jump, and slide step-by-step
+  if (rowIndex <= CONFIG.earlyTutorialEndRow) {
+    if (rowIndex === 2) {
+      obstacles.push({ lane: 0, type: 'beam_low' });
+    } else if (rowIndex === 3) {
+      obstacles.push({ lane: 1, type: 'missing_foothold' });
+    } else if (rowIndex === 4) {
+      safeAction = 'jump';
+      obstacles.push({ lane: 1, type: 'beam_low' }, { lane: 0, type: 'missing_foothold' });
+    } else if (rowIndex === 5) {
+      safeAction = 'slide';
+      obstacles.push({ lane: 0, type: 'beam_high' }, { lane: 1, type: 'beam_low' });
     }
   } else {
-    const safeHasActionObstacle = difficultyTier >= 1 && hashRow(courseSeed, rowIndex, 4) % 4 === 0;
-    if (safeHasActionObstacle) {
-      const actionType = hashRow(courseSeed, rowIndex, 5) % 2 === 0 ? 'beam_low' : 'beam_high';
-      safeAction = actionType === 'beam_low' ? 'jump' : 'slide';
-      obstacles.push({ lane: safeLane, type: actionType });
-    }
+    const pattern = hashRow(courseSeed, rowIndex, 2) % 10;
 
-    const otherLanes = ([0, 1, 2] as const).filter(l => l !== safeLane);
-    const hazardCount = difficultyTier >= 1 || hashRow(courseSeed, rowIndex, 6) % 2 === 0 ? 2 : 1;
-    const types: Exclude<ObstacleType, 'moving_load'>[] = ['beam_low', 'beam_high', 'missing_foothold'];
+    if (pattern <= 2) {
+      // Moving load row: sweeps across two lanes while leaving safeLane clear
+      if (safeLane !== 1) {
+        const centerLane: 0 | 1 | 2 = safeLane === 0 ? 2 : 0;
+        movingLoad = {
+          type: 'moving_load',
+          centerLane,
+          amplitudeMeters: 1.35,
+          periodTicks: Math.max(68, 128 - difficultyTier * 10),
+          phaseTicks: hashRow(courseSeed, rowIndex, 3) % 120,
+          safeLane,
+        };
+      } else {
+        // Safe lane is center (1): block outer lanes and optionally require jump/slide in center
+        obstacles.push({ lane: 0, type: 'beam_low' }, { lane: 2, type: 'beam_high' });
+        if ((hashRow(courseSeed, rowIndex, 4) % 1000) < CONFIG.actionObstacleChancePermille) {
+          safeAction = hashRow(courseSeed, rowIndex, 5) % 2 === 0 ? 'jump' : 'slide';
+          obstacles.push({ lane: 1, type: safeAction === 'jump' ? 'beam_low' : 'beam_high' });
+        }
+      }
+    } else {
+      // Static obstacles: always block prevSafeLane if it differs from safeLane, forcing lateral weaving!
+      const safeRequiresAction =
+        (hashRow(courseSeed, rowIndex, 4) % 1000) <
+        CONFIG.actionObstacleChancePermille + difficultyTier * 45;
+      if (safeRequiresAction) {
+        const actionType = hashRow(courseSeed, rowIndex, 5) % 2 === 0 ? 'beam_low' : 'beam_high';
+        safeAction = actionType === 'beam_low' ? 'jump' : 'slide';
+        obstacles.push({ lane: safeLane, type: actionType });
+      }
 
-    for (let i = 0; i < hazardCount; i++) {
-      const lane = otherLanes[i];
-      const tIndex = hashRow(courseSeed, rowIndex, 7 + i) % types.length;
-      obstacles.push({ lane, type: types[tIndex] });
+      const otherLanes = ([0, 1, 2] as const).filter(l => l !== safeLane);
+      // Prioritize blocking prevSafeLane first so the player must move sideways
+      otherLanes.sort((a, b) => (a === prevSafeLane ? -1 : b === prevSafeLane ? 1 : 0));
+
+      const multiBlockThreshold = Math.min(
+        CONFIG.obstacleDensityMaxPermille,
+        CONFIG.obstacleDensityBasePermille + difficultyTier * 80
+      );
+      const hazardCount =
+        (hashRow(courseSeed, rowIndex, 6) % 1000) < multiBlockThreshold ? 2 : 1;
+      const types: Exclude<ObstacleType, 'moving_load'>[] = [
+        'beam_low',
+        'beam_high',
+        'missing_foothold',
+      ];
+
+      for (let i = 0; i < hazardCount; i++) {
+        const lane = otherLanes[i];
+        const tIndex = hashRow(courseSeed, rowIndex, 7 + i) % types.length;
+        obstacles.push({ lane, type: types[tIndex] });
+      }
     }
   }
 
-  // Place coins along the safe lane (and bonus coins on adjacent lanes so magnet & 2x shine)
-  const coins: CourseCoin[] = [{ id: rowIndex * 10 + safeLane, lane: safeLane, offsetMm: 0 }];
-  const bonusCoinLane = ((safeLane + 1) % 3) as 0 | 1 | 2;
-  if (hashRow(courseSeed, rowIndex, 11) % 2 === 0) {
-    coins.push({ id: rowIndex * 10 + bonusCoinLane + 3, lane: bonusCoinLane, offsetMm: 3200 });
+  // Build coins with strong center-lane presence and weaving trail
+  const coins: CourseCoin[] = [
+    // Primary coin on safeLane at the row altitude
+    { id: rowIndex * 10 + safeLane, lane: safeLane, offsetMm: 0 },
+  ];
+
+  // Add center-lane coin between rows (at +3800mm ahead of the obstacle) so center lane is always rich in coins
+  if ((hashRow(courseSeed, rowIndex, 11) % 1000) < CONFIG.centerCoinBiasPermille) {
+    coins.push({ id: rowIndex * 10 + 4, lane: 1, offsetMm: 3800 });
+  }
+
+  // Add weaving guide coin on safeLane or opposite lane before the obstacle
+  const leadLane: 0 | 1 | 2 = safeLane === 1 ? prevSafeLane : 1;
+  if (hashRow(courseSeed, rowIndex, 12) % 2 === 0) {
+    coins.push({ id: rowIndex * 10 + 7, lane: leadLane, offsetMm: -3800 });
   }
 
   const item = determineRowItem(courseSeed, rowIndex, safeLane);
@@ -493,7 +572,7 @@ export function step(state: GameState, actions: readonly Action[] = []) {
     }
   }
 
-  // Decrement active item timers (10s = 600 steps)
+  // Decrement active item timers
   for (const key of ITEM_TYPES) {
     if (state.items[key] > 0) {
       state.items[key]--;
@@ -557,7 +636,11 @@ export function actionForKey(key: string): Action | undefined {
   )[key.length === 1 ? key.toLowerCase() : key];
 }
 
-export function actionForSwipe(dx: number, dy: number): Action | undefined {
-  if (Math.max(Math.abs(dx), Math.abs(dy)) < 28) return;
-  return Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : dy < 0 ? 'jump' : 'slide';
+export function actionForSwipe(
+  dx: number,
+  dy: number,
+  minDistance: number = CONFIG.swipeMinDistancePx
+): Action | undefined {
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < minDistance) return undefined;
+  return Math.abs(dx) >= Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : dy < 0 ? 'jump' : 'slide';
 }

@@ -46,10 +46,10 @@ const ITEM_META: Record<ItemType, { label: string; color: string; icon: string }
 };
 
 const FAIL_REASON_TEXT: Record<ObstacleType, string> = {
-  beam_low: '下部の水平鉄骨に接触しました（↑ジャンプで回避）',
-  beam_high: '上部の看板・梁に接触しました（↓スライドで回避）',
-  missing_foothold: '足場の欠損箇所で落下しました（↑ジャンプまたはレーン移動で回避）',
-  moving_load: '移動する吊り荷・鉄骨に接触しました（タイミングを見て安全レーンへ回避）',
+  beam_low: '下部の水平鉄骨に接触しました（上スワイプでジャンプ回避）',
+  beam_high: '上部の看板・梁に接触しました（下スワイプでスライド回避）',
+  missing_foothold: '足場の欠損箇所で落下しました（上スワイプまたは左右スワイプで回避）',
+  moving_load: '移動する吊り荷・鉄骨に接触しました（タイミングを見て安全レーンへスワイプ）',
 };
 
 function hasTutorial() {
@@ -105,7 +105,7 @@ export default function App() {
   const [nicknameMessage, setNicknameMessage] = useState<string>('');
   const [isNewPersonalBest, setIsNewPersonalBest] = useState(false);
 
-  const gesture = useRef<{ x: number; y: number; id: number } | null>(null);
+  const gesture = useRef<{ x: number; y: number; id: number; consumed: boolean } | null>(null);
   const onReady = useCallback(() => setReady(true), []);
   const publish = useCallback(() => setSnapshot({ ...session.current.state }), []);
 
@@ -216,6 +216,7 @@ export default function App() {
     sound.current?.setPaused(state.status === 'paused');
     session.current.inputs.length = 0;
     session.current.clock.reset();
+    gesture.current = null;
     setSettings(false);
     publish();
   }, [publish]);
@@ -223,6 +224,7 @@ export default function App() {
   const home = () => {
     session.current = makeSession(false);
     sound.current?.setBgmZone('none');
+    gesture.current = null;
     setSettings(false);
     setRankingOpen(false);
     publish();
@@ -287,6 +289,7 @@ export default function App() {
         sound.current?.setPaused(true);
         session.current.inputs.length = 0;
         session.current.clock.reset();
+        gesture.current = null;
         publish();
       }
     };
@@ -298,22 +301,51 @@ export default function App() {
     };
   }, [input, pause, publish]);
 
+  // Swipe from anywhere on the screen during active gameplay; 1 swipe = 1 action
   const pointerDown = (event: PointerEvent<HTMLElement>) => {
-    if (
-      session.current.state.status !== 'running' ||
-      !(event.target instanceof HTMLCanvasElement) ||
-      !event.isPrimary
-    )
+    if (session.current.state.status !== 'running' || !event.isPrimary) return;
+    if (event.target instanceof HTMLElement && event.target.closest('button, input, a')) return;
+    gesture.current = {
+      x: event.clientX,
+      y: event.clientY,
+      id: event.pointerId,
+      consumed: false,
+    };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Ignore pointer capture errors on synthetic events
+    }
+  };
+
+  const pointerMove = (event: PointerEvent<HTMLElement>) => {
+    const active = gesture.current;
+    if (!active || active.id !== event.pointerId || active.consumed) return;
+    if (session.current.state.status !== 'running') {
+      gesture.current = null;
       return;
-    gesture.current = { x: event.clientX, y: event.clientY, id: event.pointerId };
-    event.currentTarget.setPointerCapture(event.pointerId);
+    }
+    const action = actionForSwipe(
+      event.clientX - active.x,
+      event.clientY - active.y,
+      CONFIG.swipeMinDistancePx
+    );
+    if (action) {
+      active.consumed = true;
+      input(action);
+    }
   };
 
   const pointerUp = (event: PointerEvent<HTMLElement>) => {
     const startPt = gesture.current;
     gesture.current = null;
-    if (!startPt || startPt.id !== event.pointerId) return;
-    const action = actionForSwipe(event.clientX - startPt.x, event.clientY - startPt.y);
+    if (!startPt || startPt.id !== event.pointerId || startPt.consumed) return;
+    if (session.current.state.status !== 'running') return;
+    const action = actionForSwipe(
+      event.clientX - startPt.x,
+      event.clientY - startPt.y,
+      CONFIG.swipeMinDistancePx
+    );
     if (action) input(action);
   };
 
@@ -333,584 +365,546 @@ export default function App() {
   const activeItemsList = (Object.keys(ITEM_META) as ItemType[]).filter(
     k => snapshot.items[k] > 0
   );
+  const itemDurationSec = (CONFIG.itemDurationSteps / CONFIG.stepHz).toFixed(1);
 
   return (
-    <main
-      className={`app ${running ? 'is-running' : ''}`}
-      onPointerDown={pointerDown}
-      onPointerUp={pointerUp}
-      onPointerCancel={() => (gesture.current = null)}
-    >
-      <Suspense fallback={<div className="boot">3Dの世界を準備しています…</div>}>
-        <GameViewport
-          session={session}
-          quality={quality}
-          onReady={onReady}
-          onError={setError}
-          onSnapshot={setSnapshot}
-          onTelemetry={setTelemetry}
-          onGameEvent={onGameEvent}
-        />
-      </Suspense>
-      <div className="vignette" />
+    <div className="phone-stage">
+      <main
+        className={`app ${running ? 'is-running' : ''}`}
+        onPointerDown={pointerDown}
+        onPointerMove={pointerMove}
+        onPointerUp={pointerUp}
+        onPointerCancel={() => (gesture.current = null)}
+      >
+        <Suspense fallback={<div className="boot">3Dの世界を準備しています…</div>}>
+          <GameViewport
+            session={session}
+            quality={quality}
+            onReady={onReady}
+            onError={setError}
+            onSnapshot={setSnapshot}
+            onTelemetry={setTelemetry}
+            onGameEvent={onGameEvent}
+          />
+        </Suspense>
+        <div className="vignette" />
 
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-symbol">↟</span>
-          <div>
-            DAIEI<span>TOWER CLIMB</span>
-          </div>
-        </div>
-        <div className="build-tag">
-          <span />
-          WEEK {snapshot.courseId} <b>週間共通コース</b>
-        </div>
-        {snapshot.status === 'ready' && (
-          <button
-            className="nav-pill"
-            onClick={() => {
-              refreshRanking(snapshot.courseId);
-              setRankingOpen(true);
-            }}
-          >
-            🏆 ランキング
-          </button>
-        )}
-        <button
-          className="icon-button"
-          aria-label={running ? '一時停止' : paused ? '再開' : '設定'}
-          onClick={event => {
-            if (running || paused) pause();
-            else setSettings(!settings);
-            event.currentTarget.blur();
-          }}
-        >
-          {running ? 'Ⅱ' : paused ? '▷' : '⚙'}
-        </button>
-      </header>
-
-      {snapshot.status !== 'ready' && (
-        <section className="hud" aria-label="プレイ情報">
-          <div>
-            <span>ALTITUDE</span>
-            <strong>
-              {format(altitude)}
-              <small>m</small>
-            </strong>
-          </div>
-          <i />
-          <div>
-            <span>COINS {snapshot.items.double > 0 ? '×2' : ''}</span>
-            <strong>
-              {format(snapshot.effectiveCoins)}
-              <small>枚</small>
-            </strong>
-          </div>
-          <i />
-          <div>
-            <span>SCORE</span>
-            <strong>{format(snapshot.score)}</strong>
-          </div>
-          <p>SCORE = 有効コイン枚数 × 到達高度(m)</p>
-        </section>
-      )}
-
-      {running && activeItemsList.length > 0 && (
-        <aside className="item-timers" aria-label="発動中アイテム">
-          {activeItemsList.map(key => {
-            const meta = ITEM_META[key];
-            const sec = (snapshot.items[key] / CONFIG.stepHz).toFixed(1);
-            const pct = Math.min(100, (snapshot.items[key] / CONFIG.itemDurationSteps) * 100);
-            return (
-              <div className="item-badge" key={key} style={{ borderColor: meta.color }}>
-                <span>
-                  {meta.icon} {meta.label}
-                </span>
-                <b>{sec}s</b>
-                <div className="item-bar">
-                  <i style={{ width: `${pct}%`, background: meta.color }} />
-                </div>
+        {snapshot.status === 'ready' ? (
+          <header className="topbar">
+            <div className="brand">
+              <span className="brand-symbol">↟</span>
+              <div>
+                DAIEI<span>TOWER CLIMB</span>
               </div>
-            );
-          })}
-        </aside>
-      )}
-
-      {running && snapshot.pickupEffectSteps > 0 && snapshot.lastPickedItem && (
-        <div
-          className="pickup-toast"
-          role="status"
-          style={{ borderColor: ITEM_META[snapshot.lastPickedItem].color }}
-        >
-          <span>{ITEM_META[snapshot.lastPickedItem].icon}</span>
-          <b>{ITEM_META[snapshot.lastPickedItem].label} GET!</b>
-          <small>5.0秒間発動</small>
-        </div>
-      )}
-
-      {running && (snapshot.windDirection !== 0 || snapshot.windWarningDirection !== 0) && (
-        <div className={`wind-banner ${snapshot.windDirection !== 0 ? 'is-active' : ''}`}>
-          <span>
-            {snapshot.windDirection !== 0 ? '🌬 強風発生中' : '⚠ 強風エリア接近'}
-          </span>
-          <b>
-            {(snapshot.windDirection || snapshot.windWarningDirection) < 0
-              ? '← 左方向への風圧'
-              : '右方向への風圧 →'}
-          </b>
-        </div>
-      )}
-
-      {snapshot.status === 'ready' &&
-        !tutorial &&
-        !settings &&
-        !rankingOpen &&
-        !assetModalOpen &&
-        !error && (
-          <section className="intro">
-            <p className="eyebrow">
-              <span /> THE SKY IS ONLY THE BEGINNING
-            </p>
-            <h1>
-              大栄鉄塔
-              <br />
-              <em>クライム</em>
-              <span>DAIEI TOWER CLIMB</span>
-            </h1>
-            <p className="lead">空の、その先へ。</p>
-            <p className="intro-copy">
-              障害物をかわし、コインを集めながら一段ずつ高く。
-              <br />
-              街から青空、夕焼け、そして宇宙へ続く3Dエンドレスクライム。
-            </p>
-            <button className="primary" onClick={begin} disabled={!ready}>
-              {ready ? 'GAME START' : 'LOADING…'}
-              <span>↗</span>
+            </div>
+            <button
+              className="nav-pill"
+              onClick={() => {
+                refreshRanking(snapshot.courseId);
+                setRankingOpen(true);
+              }}
+            >
+              🏆 ランキング
             </button>
-            <div className="intro-actions">
-              <button
-                className="secondary-inline"
-                onClick={() => {
-                  refreshRanking(snapshot.courseId);
-                  setRankingOpen(true);
-                }}
-              >
-                🏆 週間TOP100ランキング
-              </button>
-              <button className="secondary-inline" onClick={() => setTutorial(true)}>
-                操作ガイド
-              </button>
-              <button className="secondary-inline" onClick={() => setAssetModalOpen(true)}>
-                素材仕様一覧
-              </button>
-            </div>
-            <div className="intro-meta">
-              <span>WEEK: {snapshot.courseId}</span>
-              <span>PC &amp; MOBILE 3-LANE 3D</span>
-            </div>
-          </section>
+            <button
+              className="icon-button"
+              aria-label="設定"
+              onClick={event => {
+                setSettings(!settings);
+                event.currentTarget.blur();
+              }}
+            >
+              ⚙
+            </button>
+          </header>
+        ) : (
+          <header className="play-topbar" aria-label="プレイ情報ヘッダー">
+            <section className="hud" aria-label="高度・スコア・コイン">
+              <div>
+                <span>ALTITUDE</span>
+                <strong>
+                  {format(altitude)}
+                  <small>m</small>
+                </strong>
+              </div>
+              <i />
+              <div>
+                <span>SCORE</span>
+                <strong>{format(snapshot.score)}</strong>
+              </div>
+              <i />
+              <div>
+                <span>COINS {snapshot.items.double > 0 ? '×2' : ''}</span>
+                <strong>
+                  {format(snapshot.effectiveCoins)}
+                  <small>枚</small>
+                </strong>
+              </div>
+            </section>
+            <button
+              className="icon-button pause-top-right"
+              aria-label={running ? '一時停止' : '再開'}
+              onClick={event => {
+                pause();
+                event.currentTarget.blur();
+              }}
+            >
+              {running ? 'Ⅱ' : '▷'}
+            </button>
+          </header>
         )}
 
-      <aside className="altitude-rail" aria-label="現在の高度帯">
-        <span>
-          UPWARD
-          <br />
-          &amp; BEYOND
-        </span>
-        <div className="rail">
-          <span style={{ bottom: `${Math.min(96, (altitude / 550) * 100)}%` }} />
-        </div>
-        <b>
-          {String(altitude).padStart(3, '0')}
-          <small> M</small>
-        </b>
-        <p>{zone}</p>
-      </aside>
+        {running && activeItemsList.length > 0 && (
+          <aside className="item-timers" aria-label="発動中アイテム">
+            {activeItemsList.map(key => {
+              const meta = ITEM_META[key];
+              const sec = (snapshot.items[key] / CONFIG.stepHz).toFixed(1);
+              const pct = Math.min(100, (snapshot.items[key] / CONFIG.itemDurationSteps) * 100);
+              return (
+                <div className="item-badge" key={key} style={{ borderColor: meta.color }}>
+                  <span>
+                    {meta.icon} {meta.label}
+                  </span>
+                  <b>{sec}s</b>
+                  <div className="item-bar">
+                    <i style={{ width: `${pct}%`, background: meta.color }} />
+                  </div>
+                </div>
+              );
+            })}
+          </aside>
+        )}
 
-      {running && (
-        <nav className="touch-controls" aria-label="ゲーム操作">
-          <button onClick={() => input('left')} aria-label="左へ">
-            ←
-          </button>
-          <button onClick={() => input('jump')} aria-label="ジャンプ">
-            ↑
-          </button>
-          <button onClick={() => input('slide')} aria-label="スライド">
-            ↓
-          </button>
-          <button onClick={() => input('right')} aria-label="右へ">
-            →
-          </button>
-        </nav>
-      )}
-
-      {(tutorial || paused || settings || gameover || rankingOpen || assetModalOpen || error) && (
-        <div className="overlay">
-          <section
-            className={`panel ${rankingOpen || assetModalOpen ? 'panel-wide' : ''}`}
-            role="dialog"
-            aria-modal="true"
-            aria-label={
-              error
-                ? '描画エラー'
-                : gameover
-                  ? 'ゲームオーバー'
-                  : rankingOpen
-                    ? '週間ランキング'
-                    : assetModalOpen
-                      ? '差し替え素材仕様'
-                      : tutorial
-                        ? '操作ガイド'
-                        : settings
-                          ? '設定'
-                          : '一時停止'
-            }
+        {running && snapshot.pickupEffectSteps > 0 && snapshot.lastPickedItem && (
+          <div
+            className="pickup-toast"
+            role="status"
+            style={{ borderColor: ITEM_META[snapshot.lastPickedItem].color }}
           >
-            {error ? (
-              <>
-                <p className="eyebrow">WEBGL ERROR</p>
-                <h2>3D画面を表示できません</h2>
-                <p>{error}</p>
-                <button className="primary" onClick={() => window.location.reload()}>
-                  再読み込み ↗
-                </button>
-              </>
-            ) : gameover ? (
-              <>
-                <p className="eyebrow">
-                  {isNewPersonalBest ? '✨ NEW WEEKLY RECORD!' : 'CLIMB FINISHED'}
-                </p>
-                <h2>GAME OVER</h2>
-                {snapshot.failReason && (
-                  <p className="fail-reason">{FAIL_REASON_TEXT[snapshot.failReason]}</p>
-                )}
-                <div className="result-grid">
-                  <div>
-                    <span>FINAL SCORE</span>
-                    <strong>{format(snapshot.score)}</strong>
-                  </div>
-                  <div>
-                    <span>ALTITUDE</span>
-                    <strong>
-                      {format(altitude)}
-                      <small>m</small>
-                    </strong>
-                  </div>
-                  <div>
-                    <span>COINS</span>
-                    <strong>
-                      {format(snapshot.effectiveCoins)}
-                      <small>枚</small>
-                    </strong>
-                  </div>
-                </div>
+            <span>{ITEM_META[snapshot.lastPickedItem].icon}</span>
+            <b>{ITEM_META[snapshot.lastPickedItem].label} GET!</b>
+            <small>{itemDurationSec}秒間発動</small>
+          </div>
+        )}
 
-                <div className="rank-status-box">
-                  {rankingStatus === 'submitting' ? (
-                    <p>サーバーで操作履歴を検証・集計中…</p>
-                  ) : rankingView?.myRecord ? (
-                    <p>
-                      今週の自己ベスト: <b>{format(rankingView.myRecord.score)}点</b>（
-                      {rankingView.myRecord.rank
-                        ? `週間 ${rankingView.myRecord.rank}位`
-                        : '仮記録として保存済み・ニックネーム登録でランキング掲載'}
-                      ）
-                    </p>
-                  ) : (
-                    <p>記録を保存しました。</p>
-                  )}
+        {running && (snapshot.windDirection !== 0 || snapshot.windWarningDirection !== 0) && (
+          <div className={`wind-banner ${snapshot.windDirection !== 0 ? 'is-active' : ''}`}>
+            <span>
+              {snapshot.windDirection !== 0 ? '🌬 強風発生中' : '⚠ 強風接近'}
+            </span>
+            <b>
+              {(snapshot.windDirection || snapshot.windWarningDirection) < 0
+                ? '← 左風'
+                : '右風 →'}
+            </b>
+          </div>
+        )}
 
-                  <form className="nickname-form" onSubmit={handleNicknameSubmit}>
-                    <input
-                      type="text"
-                      maxLength={12}
-                      placeholder="ニックネーム (1〜12文字)"
-                      value={nicknameInput}
-                      onChange={e => setNicknameInput(e.target.value)}
-                      aria-label="ランキング掲載用ニックネーム"
-                    />
-                    <button type="submit" className="secondary-btn">
-                      ランキングに登録
-                    </button>
-                  </form>
-                  {nicknameMessage && <small className="nick-feedback">{nicknameMessage}</small>}
-                </div>
-
+        {snapshot.status === 'ready' &&
+          !tutorial &&
+          !settings &&
+          !rankingOpen &&
+          !assetModalOpen &&
+          !error && (
+            <section className="intro">
+              <p className="eyebrow">
+                <span /> THE SKY IS ONLY THE BEGINNING
+              </p>
+              <h1>
+                大栄鉄塔
+                <br />
+                <em>クライム</em>
+                <span>DAIEI TOWER CLIMB</span>
+              </h1>
+              <p className="lead">空の、その先へ。</p>
+              <p className="intro-copy">
+                上下左右のスワイプで障害物をかわし、コインを集めて高く登ろう。
+              </p>
+              <button className="primary" onClick={begin} disabled={!ready}>
+                {ready ? 'GAME START' : 'LOADING…'}
+                <span>↗</span>
+              </button>
+              <div className="intro-actions">
                 <button
-                  className="primary"
-                  onClick={event => {
-                    start();
-                    event.currentTarget.blur();
+                  className="secondary-inline"
+                  onClick={() => {
+                    refreshRanking(snapshot.courseId);
+                    setRankingOpen(true);
                   }}
                 >
-                  もう一度登る（即時再挑戦）<span>↻</span>
+                  🏆 週間ランキング
                 </button>
-                <div className="panel-links">
+                <button className="secondary-inline" onClick={() => setTutorial(true)}>
+                  操作ガイド
+                </button>
+                <button className="secondary-inline" onClick={() => setAssetModalOpen(true)}>
+                  素材仕様
+                </button>
+              </div>
+              <div className="intro-meta">
+                <span>WEEK: {snapshot.courseId}</span>
+                <span>SWIPE 3-LANE 3D</span>
+              </div>
+            </section>
+          )}
+
+        <aside className="altitude-rail" aria-label="現在の高度帯">
+          <div className="rail">
+            <span style={{ bottom: `${Math.min(96, (altitude / 550) * 100)}%` }} />
+          </div>
+          <b>
+            {String(altitude).padStart(3, '0')}
+            <small>m</small>
+          </b>
+          <p>{zone}</p>
+        </aside>
+
+        {(tutorial || paused || settings || gameover || rankingOpen || assetModalOpen || error) && (
+          <div className="overlay">
+            <section
+              className={`panel ${rankingOpen || assetModalOpen ? 'panel-wide' : ''}`}
+              role="dialog"
+              aria-modal="true"
+              aria-label={
+                error
+                  ? '描画エラー'
+                  : gameover
+                    ? 'ゲームオーバー'
+                    : rankingOpen
+                      ? '週間ランキング'
+                      : assetModalOpen
+                        ? '差し替え素材仕様'
+                        : tutorial
+                          ? '操作ガイド'
+                          : settings
+                            ? '設定'
+                            : '一時停止'
+              }
+            >
+              {error ? (
+                <>
+                  <p className="eyebrow">WEBGL ERROR</p>
+                  <h2>3D画面を表示できません</h2>
+                  <p>{error}</p>
+                  <button className="primary" onClick={() => window.location.reload()}>
+                    再読み込み ↗
+                  </button>
+                </>
+              ) : gameover ? (
+                <>
+                  <p className="eyebrow">
+                    {isNewPersonalBest ? '✨ NEW WEEKLY RECORD!' : 'CLIMB FINISHED'}
+                  </p>
+                  <h2>GAME OVER</h2>
+                  {snapshot.failReason && (
+                    <p className="fail-reason">{FAIL_REASON_TEXT[snapshot.failReason]}</p>
+                  )}
+                  <div className="result-grid">
+                    <div>
+                      <span>SCORE</span>
+                      <strong>{format(snapshot.score)}</strong>
+                    </div>
+                    <div>
+                      <span>ALTITUDE</span>
+                      <strong>
+                        {format(altitude)}
+                        <small>m</small>
+                      </strong>
+                    </div>
+                    <div>
+                      <span>COINS</span>
+                      <strong>
+                        {format(snapshot.effectiveCoins)}
+                        <small>枚</small>
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="rank-status-box">
+                    {rankingStatus === 'submitting' ? (
+                      <p>サーバーで操作履歴を検証・集計中…</p>
+                    ) : rankingView?.myRecord ? (
+                      <p>
+                        今週の自己ベスト: <b>{format(rankingView.myRecord.score)}点</b>（
+                        {rankingView.myRecord.rank
+                          ? `週間 ${rankingView.myRecord.rank}位`
+                          : '仮記録保存済み・ニックネーム登録でランキング掲載'}
+                        ）
+                      </p>
+                    ) : (
+                      <p>記録を保存しました。</p>
+                    )}
+
+                    <form className="nickname-form" onSubmit={handleNicknameSubmit}>
+                      <input
+                        type="text"
+                        maxLength={12}
+                        placeholder="ニックネーム (1〜12文字)"
+                        value={nicknameInput}
+                        onChange={e => setNicknameInput(e.target.value)}
+                        aria-label="ランキング掲載用ニックネーム"
+                      />
+                      <button type="submit" className="secondary-btn">
+                        登録
+                      </button>
+                    </form>
+                    {nicknameMessage && <small className="nick-feedback">{nicknameMessage}</small>}
+                  </div>
+
                   <button
-                    onClick={() => {
-                      setRankingOpen(true);
+                    className="primary"
+                    onClick={event => {
+                      start();
+                      event.currentTarget.blur();
                     }}
                   >
-                    🏆 週間ランキングを見る
+                    もう一度登る（即時再挑戦）<span>↻</span>
                   </button>
-                  <button onClick={home}>タイトルへ戻る</button>
-                </div>
-              </>
-            ) : rankingOpen ? (
-              <>
-                <p className="eyebrow">WEEKLY LEADERBOARD (JST MONDAY 00:00 RESET)</p>
-                <h2>週間TOP100ランキング</h2>
-                <p className="subtle">
-                  対象週: <b>{snapshot.courseId}</b>（毎週月曜0:00 JST切替・全プレイヤー同一シードコース）
-                </p>
+                  <div className="panel-links">
+                    <button onClick={() => setRankingOpen(true)}>🏆 週間ランキングを見る</button>
+                    <button onClick={home}>タイトルへ戻る</button>
+                  </div>
+                </>
+              ) : rankingOpen ? (
+                <>
+                  <p className="eyebrow">WEEKLY LEADERBOARD (JST MONDAY 00:00)</p>
+                  <h2>週間TOP100ランキング</h2>
+                  <p className="subtle">
+                    対象週: <b>{snapshot.courseId}</b>（毎週月曜0:00 JST切替・同一シードコース）
+                  </p>
 
-                {rankingView && rankingView.podium.length > 0 && (
-                  <div className="podium-grid" aria-label="上位3名表彰台">
-                    {rankingView.podium.map(p => (
-                      <div className={`podium-card rank-${p.rank}`} key={p.playerId}>
-                        <span className="medal">
-                          {p.rank === 1 ? '🥇 1st' : p.rank === 2 ? '🥈 2nd' : '🥉 3rd'}
+                  {rankingView && rankingView.podium.length > 0 && (
+                    <div className="podium-grid" aria-label="上位3名表彰台">
+                      {rankingView.podium.map(p => (
+                        <div className={`podium-card rank-${p.rank}`} key={p.playerId}>
+                          <span className="medal">
+                            {p.rank === 1 ? '🥇 1st' : p.rank === 2 ? '🥈 2nd' : '🥉 3rd'}
+                          </span>
+                          <strong>{p.nickname}</strong>
+                          <b>{format(p.score)} pt</b>
+                          <small>
+                            {format(p.altitudeMeters)}m × {format(p.effectiveCoins)}枚
+                          </small>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="ranking-list" role="region" aria-label="4位〜100位一覧">
+                    {rankingView && rankingView.top100.length > 3 ? (
+                      rankingView.top100.slice(3).map(entry => (
+                        <div
+                          className={`ranking-row ${entry.playerId === playerId.current ? 'is-me' : ''}`}
+                          key={entry.playerId}
+                        >
+                          <span className="r-rank">#{entry.rank}</span>
+                          <span className="r-name">{entry.nickname}</span>
+                          <span className="r-detail">
+                            {format(entry.altitudeMeters)}m / {format(entry.effectiveCoins)}枚
+                          </span>
+                          <strong className="r-score">{format(entry.score)}</strong>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="subtle">4位以下の記録はまだありません。</p>
+                    )}
+                  </div>
+
+                  <div className="my-rank-bar">
+                    <span>今週の自己ベスト:</span>
+                    {rankingView?.myRecord ? (
+                      <b>
+                        {rankingView.myRecord.rank
+                          ? `${rankingView.myRecord.rank}位`
+                          : '未公開（仮記録）'}{' '}
+                        / {format(rankingView.myRecord.score)}点
+                      </b>
+                    ) : (
+                      <b>未記録</b>
+                    )}
+                  </div>
+
+                  <button className="primary" onClick={() => setRankingOpen(false)}>
+                    閉じる<span>↩</span>
+                  </button>
+                </>
+              ) : assetModalOpen ? (
+                <>
+                  <p className="eyebrow">REPLACEABLE ASSET MANIFEST</p>
+                  <h2>自作素材（GLB・PNG・MP3/WAV）仕様</h2>
+                  <div className="ranking-list">
+                    <p className="subtle">
+                      <b>3Dモデル (public/assets/models/)</b>
+                    </p>
+                    {MODEL_ASSETS.map(m => (
+                      <div className="ranking-row" key={m.id}>
+                        <span className="r-name">{m.fileName}</span>
+                        <span className="r-detail">
+                          {m.dimensionsMeters.width}×{m.dimensionsMeters.height}×
+                          {m.dimensionsMeters.depth}m
                         </span>
-                        <strong>{p.nickname}</strong>
-                        <b>{format(p.score)} pt</b>
-                        <small>
-                          {format(p.altitudeMeters)}m × {format(p.effectiveCoins)}枚
-                        </small>
+                      </div>
+                    ))}
+                    <p className="subtle">
+                      <b>画像 (public/assets/images/)</b>
+                    </p>
+                    {IMAGE_ASSETS.map(img => (
+                      <div className="ranking-row" key={img.id}>
+                        <span className="r-name">{img.fileName}</span>
+                        <span className="r-detail">
+                          {img.aspectRatio} ({img.pixelSize.width}×{img.pixelSize.height}px)
+                        </span>
+                      </div>
+                    ))}
+                    <p className="subtle">
+                      <b>音源 (public/assets/audio/)</b>
+                    </p>
+                    {AUDIO_ASSETS.map(aud => (
+                      <div className="ranking-row" key={aud.id}>
+                        <span className="r-name">{aud.fileName}</span>
+                        <span className="r-detail">
+                          {aud.durationSeconds} / {aud.loop ? 'ループ' : '単発'}
+                        </span>
                       </div>
                     ))}
                   </div>
-                )}
-
-                <div className="ranking-list" role="region" aria-label="4位〜100位一覧">
-                  {rankingView && rankingView.top100.length > 3 ? (
-                    rankingView.top100.slice(3).map(entry => (
-                      <div
-                        className={`ranking-row ${entry.playerId === playerId.current ? 'is-me' : ''}`}
-                        key={entry.playerId}
+                  <button className="primary" onClick={() => setAssetModalOpen(false)}>
+                    閉じる<span>↩</span>
+                  </button>
+                </>
+              ) : tutorial ? (
+                <>
+                  <p className="eyebrow">HOW TO CLIMB</p>
+                  <h2>画面スワイプで直感操作</h2>
+                  <p>
+                    画面のどこでもスワイプして操作できます。障害物をかわし、コインとアイテムを集めて高く登りましょう！
+                  </p>
+                  <div className="guide-grid">
+                    <div>
+                      <b>← →</b>
+                      <span>左右スワイプ</span>
+                      <small>左右レーン移動</small>
+                    </div>
+                    <div>
+                      <b>↑</b>
+                      <span>上スワイプ</span>
+                      <small>ジャンプ回避</small>
+                    </div>
+                    <div>
+                      <b>↓</b>
+                      <span>下スワイプ</span>
+                      <small>スライドくぐり</small>
+                    </div>
+                  </div>
+                  <p className="subtle">
+                    特殊アイテム（マグネット・コイン2倍・スロー・ハイジャンプ）は効果時間が上部に表示されます。
+                  </p>
+                  <button
+                    className="primary"
+                    onClick={event => {
+                      finishTutorial();
+                      event.currentTarget.blur();
+                    }}
+                  >
+                    登りはじめる<span>↗</span>
+                  </button>
+                </>
+              ) : settings ? (
+                <>
+                  <p className="eyebrow">SETTINGS</p>
+                  <h2>画質・サウンド設定</h2>
+                  <div className="quality-options">
+                    {(['low', 'medium', 'high'] as const).map((q, i) => (
+                      <button
+                        className={quality === q ? 'selected' : ''}
+                        key={q}
+                        aria-pressed={quality === q}
+                        onClick={() => {
+                          setAutoQuality(false);
+                          setQuality(q);
+                        }}
                       >
-                        <span className="r-rank">#{entry.rank}</span>
-                        <span className="r-name">{entry.nickname}</span>
-                        <span className="r-detail">
-                          {format(entry.altitudeMeters)}m / {format(entry.effectiveCoins)}枚
-                        </span>
-                        <strong className="r-score">{format(entry.score)}</strong>
-                      </div>
-                    ))
-                  ) : (
-                    <p className="subtle">4位以下の記録はまだありません。</p>
-                  )}
-                </div>
-
-                <div className="my-rank-bar">
-                  <span>あなたの今週の最高記録:</span>
-                  {rankingView?.myRecord ? (
-                    <b>
-                      {rankingView.myRecord.rank
-                        ? `${rankingView.myRecord.rank}位`
-                        : '未公開（仮記録）'}{' '}
-                      / {format(rankingView.myRecord.score)}点（
-                      {format(rankingView.myRecord.altitudeMeters)}m・
-                      {format(rankingView.myRecord.effectiveCoins)}枚）
-                    </b>
-                  ) : (
-                    <b>未記録（プレイすると自動集計されます）</b>
-                  )}
-                </div>
-
-                <button className="primary" onClick={() => setRankingOpen(false)}>
-                  閉じる<span>↩</span>
-                </button>
-              </>
-            ) : assetModalOpen ? (
-              <>
-                <p className="eyebrow">REPLACEABLE ASSET MANIFEST</p>
-                <h2>自作素材（GLB・PNG・MP3/WAV）差し替え仕様</h2>
-                <div className="ranking-list">
-                  <p className="subtle">
-                    <b>3Dモデル (GLB形式 / public/assets/models/)</b>
-                  </p>
-                  {MODEL_ASSETS.map(m => (
-                    <div className="ranking-row" key={m.id}>
-                      <span className="r-name">{m.fileName}</span>
-                      <span className="r-detail">
-                        {m.dimensionsMeters.width}×{m.dimensionsMeters.height}×
-                        {m.dimensionsMeters.depth}m
-                      </span>
-                      <small>{m.description}</small>
-                    </div>
-                  ))}
-                  <p className="subtle">
-                    <b>画像 (PNG形式 / public/assets/images/)</b>
-                  </p>
-                  {IMAGE_ASSETS.map(img => (
-                    <div className="ranking-row" key={img.id}>
-                      <span className="r-name">{img.fileName}</span>
-                      <span className="r-detail">
-                        {img.aspectRatio} ({img.pixelSize.width}×{img.pixelSize.height}px)
-                      </span>
-                      <small>{img.description}</small>
-                    </div>
-                  ))}
-                  <p className="subtle">
-                    <b>音源 (MP3・WAV形式 / public/assets/audio/)</b>
-                  </p>
-                  {AUDIO_ASSETS.map(aud => (
-                    <div className="ranking-row" key={aud.id}>
-                      <span className="r-name">{aud.fileName}</span>
-                      <span className="r-detail">
-                        {aud.durationSeconds} / {aud.loop ? 'ループ' : '単発'}
-                      </span>
-                      <small>{aud.description}</small>
-                    </div>
-                  ))}
-                </div>
-                <button className="primary" onClick={() => setAssetModalOpen(false)}>
-                  閉じる<span>↩</span>
-                </button>
-              </>
-            ) : tutorial ? (
-              <>
-                <p className="eyebrow">HOW TO CLIMB</p>
-                <h2>さあ、空へ登ろう。</h2>
-                <p>
-                  自動で鉄塔を登ります。障害物に1回接触するとゲームオーバー。コインを集めて高みを目指しましょう！
-                </p>
-                <div className="guide-grid">
-                  <div>
-                    <b>← →</b>
-                    <span>左右レーン移動</span>
-                    <small>← → / A D / 左右スワイプ</small>
+                        {['低', '中', '高'][i]}
+                      </button>
+                    ))}
                   </div>
-                  <div>
-                    <b>↑</b>
-                    <span>ジャンプ（低い梁・欠損回避）</span>
-                    <small>↑ / W / Space / 上スワイプ</small>
+                  <label className="setting-row">
+                    <span>自動画質調整（FPS連動）</span>
+                    <input
+                      type="checkbox"
+                      checked={autoQuality}
+                      onChange={e => setAutoQuality(e.target.checked)}
+                    />
+                  </label>
+                  <label className="setting-row">
+                    <span>ミュート（消音）</span>
+                    <input
+                      type="checkbox"
+                      checked={audioSettings.muted}
+                      onChange={e => updateAudio({ muted: e.target.checked })}
+                    />
+                  </label>
+                  <label className="setting-row">
+                    <span>BGM音量 ({Math.round(audioSettings.bgmVolume * 100)}%)</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={audioSettings.bgmVolume}
+                      onChange={e => updateAudio({ bgmVolume: Number(e.target.value) })}
+                    />
+                  </label>
+                  <label className="setting-row">
+                    <span>効果音音量 ({Math.round(audioSettings.seVolume * 100)}%)</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={audioSettings.seVolume}
+                      onChange={e => updateAudio({ seVolume: Number(e.target.value) })}
+                    />
+                  </label>
+                  <button className="primary" onClick={() => setSettings(false)}>
+                    戻る<span>↩</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="eyebrow">TAKE A BREATH</p>
+                  <h2>一時停止中</h2>
+                  <p>
+                    {format(altitude)}mまで上昇（現在スコア: {format(snapshot.score)}点）。
+                  </p>
+                  <button
+                    className="primary"
+                    onClick={event => {
+                      pause();
+                      event.currentTarget.blur();
+                    }}
+                  >
+                    再開する<span>▷</span>
+                  </button>
+                  <button
+                    className="secondary"
+                    onClick={event => {
+                      start();
+                      event.currentTarget.blur();
+                    }}
+                  >
+                    最初から登る（リスタート）
+                  </button>
+                  <div className="panel-links">
+                    <button onClick={() => setSettings(true)}>画質・音量設定</button>
+                    <button onClick={home}>タイトルへ戻る</button>
                   </div>
-                  <div>
-                    <b>↓</b>
-                    <span>スライド（高い梁くぐり）</span>
-                    <small>↓ / S / 下スワイプ</small>
-                  </div>
-                </div>
-                <p className="subtle">
-                  特殊アイテム（マグネット・コイン2倍・スロー・ハイジャンプ）は各5秒間有効です。
-                </p>
-                <button
-                  className="primary"
-                  onClick={event => {
-                    finishTutorial();
-                    event.currentTarget.blur();
-                  }}
-                >
-                  登りはじめる<span>↗</span>
-                </button>
-              </>
-            ) : settings ? (
-              <>
-                <p className="eyebrow">SETTINGS</p>
-                <h2>画質・サウンド設定</h2>
-                <p>描画解像度とBGM・効果音の音量を調整します。</p>
-                <div className="quality-options">
-                  {(['low', 'medium', 'high'] as const).map((q, i) => (
-                    <button
-                      className={quality === q ? 'selected' : ''}
-                      key={q}
-                      aria-pressed={quality === q}
-                      onClick={() => {
-                        setAutoQuality(false);
-                        setQuality(q);
-                      }}
-                    >
-                      {['低', '中', '高'][i]}
-                    </button>
-                  ))}
-                </div>
-                <label className="setting-row">
-                  <span>自動画質調整（FPS連動）</span>
-                  <input
-                    type="checkbox"
-                    checked={autoQuality}
-                    onChange={e => setAutoQuality(e.target.checked)}
-                  />
-                </label>
-                <label className="setting-row">
-                  <span>ミュート（消音）</span>
-                  <input
-                    type="checkbox"
-                    checked={audioSettings.muted}
-                    onChange={e => updateAudio({ muted: e.target.checked })}
-                  />
-                </label>
-                <label className="setting-row">
-                  <span>BGM音量 ({Math.round(audioSettings.bgmVolume * 100)}%)</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={audioSettings.bgmVolume}
-                    onChange={e => updateAudio({ bgmVolume: Number(e.target.value) })}
-                  />
-                </label>
-                <label className="setting-row">
-                  <span>効果音音量 ({Math.round(audioSettings.seVolume * 100)}%)</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={audioSettings.seVolume}
-                    onChange={e => updateAudio({ seVolume: Number(e.target.value) })}
-                  />
-                </label>
-                <button className="primary" onClick={() => setSettings(false)}>
-                  戻る<span>↩</span>
-                </button>
-              </>
-            ) : (
-              <>
-                <p className="eyebrow">TAKE A BREATH</p>
-                <h2>一時停止中</h2>
-                <p>
-                  {format(altitude)}mまで上昇（現在スコア: {format(snapshot.score)}点）。
-                </p>
-                <button
-                  className="primary"
-                  onClick={event => {
-                    pause();
-                    event.currentTarget.blur();
-                  }}
-                >
-                  再開する<span>▷</span>
-                </button>
-                <button
-                  className="secondary"
-                  onClick={event => {
-                    start();
-                    event.currentTarget.blur();
-                  }}
-                >
-                  最初から登る（リスタート）
-                </button>
-                <div className="panel-links">
-                  <button onClick={() => setSettings(true)}>画質・音量設定</button>
-                  <button onClick={home}>終了してタイトルへ戻る</button>
-                </div>
-              </>
-            )}
-          </section>
-        </div>
-      )}
-
-      <footer className="footer">
-        <span className="controls-caption">
-          ← → 移動 <i /> ↑ ジャンプ <i /> ↓ スライド <i /> ESC 一時停止
-        </span>
-        <span className="telemetry">
-          {telemetry.fps || '—'} FPS <i /> {telemetry.modules} MODULES <i /> {telemetry.calls} DRAWS
-        </span>
-        <span className="disclaimer">高度はゲーム上の演出値です</span>
-      </footer>
-    </main>
+                </>
+              )}
+            </section>
+          </div>
+        )}
+      </main>
+    </div>
   );
 }

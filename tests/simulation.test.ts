@@ -18,6 +18,7 @@ import {
   step,
   type Action,
   type ItemType,
+  type ObstacleType,
 } from '../src/game/simulation';
 import {
   buildAutoPilotRun,
@@ -28,7 +29,7 @@ import {
 
 const running = () => ({ ...createState(), status: 'running' as const });
 
-describe('Daiei Tower Climb: +20% speed update, 4 special items, and deterministic ranking verification', () => {
+describe('Daiei Tower Climb: Mobile 9:16 UI, Swipe Controls, Weaving Course, and Weekly Ranking', () => {
   it('increases initial climb speed by a further 20% (to 101 mm/step = 6.06 m/s) without moving render origin', () => {
     expect(CONFIG.legacyBaseClimbMmPerStep).toBe(70);
     expect(CONFIG.previousClimbMmPerStep).toBe(84);
@@ -81,12 +82,12 @@ describe('Daiei Tower Climb: +20% speed update, 4 special items, and determinist
     expect(count).toBe(15);
   });
 
-  it('moves smoothly in ten ticks, allows jump lane change, clamps edge lanes', () => {
+  it('moves smoothly in CONFIG.laneChangeSteps ticks, allows jump lane change, clamps edge lanes', () => {
     const state = running();
     step(state, ['jump', 'left']);
     expect(state.x).toBeLessThan(0);
     expect(state.x).toBeGreaterThan(-2.4);
-    for (let i = 0; i < 9; i++) step(state, ['left']);
+    for (let i = 1; i < CONFIG.laneChangeSteps; i++) step(state, ['left']);
     expect(state.lane).toBe(0);
     expect(state.x).toBe(-2.4);
     expect(state.motion).toBe('jump');
@@ -129,20 +130,63 @@ describe('Daiei Tower Climb: +20% speed update, 4 special items, and determinist
     expect(Number.isSafeInteger(state.altitudeMm)).toBe(true);
   });
 
-  it('maps keyboard and swipe inputs and rejects small touch motions', () => {
+  it('maps keyboard and 4-direction swipe inputs using dominant axis and configurable swipeMinDistancePx', () => {
     for (const key of ['ArrowLeft', 'a', 'A']) expect(actionForKey(key)).toBe('left');
     for (const key of ['ArrowRight', 'd', 'D']) expect(actionForKey(key)).toBe('right');
     for (const key of ['ArrowUp', 'w', 'W', ' ']) expect(actionForKey(key)).toBe('jump');
     for (const key of ['ArrowDown', 's', 'S']) expect(actionForKey(key)).toBe('slide');
     expect(actionForKey('x')).toBeUndefined();
     expect(actionForSwipe(12, 12)).toBeUndefined();
-    expect(actionForSwipe(-80, 10)).toBe('left');
-    expect(actionForSwipe(80, 10)).toBe('right');
-    expect(actionForSwipe(10, -80)).toBe('jump');
-    expect(actionForSwipe(10, 80)).toBe('slide');
+    expect(actionForSwipe(CONFIG.swipeMinDistancePx - 1, 0)).toBeUndefined();
+    expect(actionForSwipe(-CONFIG.swipeMinDistancePx, 10)).toBe('left');
+    expect(actionForSwipe(CONFIG.swipeMinDistancePx, 10)).toBe('right');
+    expect(actionForSwipe(10, -CONFIG.swipeMinDistancePx)).toBe('jump');
+    expect(actionForSwipe(10, CONFIG.swipeMinDistancePx)).toBe('slide');
+    expect(actionForSwipe(40, 20, 50)).toBeUndefined();
   });
 
-  it('spawns all 4 special items in early rows on collectible safe lanes and allows actual pickup during play', () => {
+  it('generates a side-to-side weaving course with enriched center-lane coins, onboarding rows, and all 4 obstacle types', () => {
+    const seed = seedFromCourseId('2026-11-02');
+    let laneChanges = 0;
+    let centerCoins = 0;
+    let sideCoins = 0;
+    const obstacleTypes = new Set<ObstacleType>();
+    const requiredActions = new Set<'jump' | 'slide'>();
+
+    for (let r = 1; r <= 80; r++) {
+      const row = getCourseRow(seed, r);
+      for (const c of row.coins) {
+        if (c.lane === 1) centerCoins++;
+        else sideCoins++;
+      }
+      for (const o of row.obstacles) {
+        obstacleTypes.add(o.type);
+      }
+      if (row.movingLoad) {
+        obstacleTypes.add(row.movingLoad.type);
+      }
+      if (row.safeAction === 'jump' || row.safeAction === 'slide') {
+        requiredActions.add(row.safeAction);
+      }
+      if (r > CONFIG.earlyTutorialEndRow) {
+        const prev = getCourseRow(seed, r - 1);
+        if (row.safeLane !== prev.safeLane) laneChanges++;
+      }
+    }
+
+    // Safe lane weaves actively across rows after tutorial
+    expect(laneChanges).toBeGreaterThanOrEqual(45);
+    // Center lane has high coin density (more than either side lane on average)
+    expect(centerCoins).toBeGreaterThan(sideCoins / 2);
+    // All 4 obstacle types are utilized
+    expect(obstacleTypes).toEqual(
+      new Set<ObstacleType>(['beam_low', 'beam_high', 'missing_foothold', 'moving_load'])
+    );
+    // Both jump and slide are required along the safe path
+    expect(requiredActions).toEqual(new Set(['jump', 'slide']));
+  });
+
+  it('spawns all 4 special items in early rows on collectible lanes and allows actual pickup during play', () => {
     const seed = seedFromCourseId('2026-11-02');
     const earlyItems = CONFIG.itemEarlyShowcaseRows.map(r => getCourseRow(seed, r).item);
     expect(earlyItems.map(item => item?.type)).toEqual(['magnet', 'double', 'slow', 'high_jump']);
