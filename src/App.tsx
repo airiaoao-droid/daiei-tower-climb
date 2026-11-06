@@ -46,10 +46,10 @@ const ITEM_META: Record<ItemType, { label: string; color: string; icon: string }
 };
 
 const FAIL_REASON_TEXT: Record<ObstacleType, string> = {
-  beam_low: '下部の水平鉄骨に接触しました（上スワイプでジャンプ回避）',
-  beam_high: '上部の看板・梁に接触しました（下スワイプでスライド回避）',
-  missing_foothold: '足場の欠損箇所で落下しました（上スワイプまたは左右スワイプで回避）',
-  moving_load: '移動する吊り荷・鉄骨に接触しました（タイミングを見て安全レーンへスワイプ）',
+  beam_low: '突出鉄骨（H形鋼）に接触しました（上スワイプでジャンプ回避）',
+  beam_high: '上部の突出鉄骨・梁に接触しました（下スワイプでスライド回避）',
+  missing_foothold: '高圧放電器・足場欠損に接触しました（上スワイプまたは左右スワイプで回避）',
+  moving_load: '警備ドローン機雷に接触しました（タイミングを見て安全レーンへスワイプ）',
 };
 
 function hasTutorial() {
@@ -100,7 +100,9 @@ export default function App() {
   });
 
   const [rankingView, setRankingView] = useState<WeeklyLeaderboardView | null>(null);
-  const [rankingStatus, setRankingStatus] = useState<'idle' | 'loading' | 'submitting' | 'saved' | 'error'>('idle');
+  const [rankingStatus, setRankingStatus] = useState<
+    'idle' | 'loading' | 'submitting' | 'saved' | 'error'
+  >('idle');
   const [nicknameInput, setNicknameInput] = useState<string>(() => getSavedNickname());
   const [nicknameMessage, setNicknameMessage] = useState<string>('');
   const [isNewPersonalBest, setIsNewPersonalBest] = useState(false);
@@ -392,10 +394,18 @@ export default function App() {
         {snapshot.status === 'ready' ? (
           <header className="topbar">
             <div className="brand">
-              <span className="brand-symbol">↟</span>
+              <img
+                className="brand-avatar"
+                src="/assets/images/chr_01_climber_2048x2048.png"
+                alt="大栄クライマー"
+              />
               <div>
                 DAIEI<span>TOWER CLIMB</span>
               </div>
+            </div>
+            <div className="build-tag">
+              <span />
+              RETRO TENSION
             </div>
             <button
               className="nav-pill"
@@ -434,7 +444,14 @@ export default function App() {
               </div>
               <i />
               <div>
-                <span>COINS {snapshot.items.double > 0 ? '×2' : ''}</span>
+                <span className="hud-coin-label">
+                  <img
+                    className="coin-icon-inline"
+                    src="/assets/images/item_01_energy_coin_512x512.png"
+                    alt=""
+                  />
+                  COINS {snapshot.items.double > 0 ? '×2' : ''}
+                </span>
                 <strong>
                   {format(snapshot.effectiveCoins)}
                   <small>枚</small>
@@ -442,7 +459,7 @@ export default function App() {
               </div>
             </section>
             <button
-              className="icon-button pause-top-right"
+              className="pause-top-right"
               aria-label={running ? '一時停止' : '再開'}
               onClick={event => {
                 pause();
@@ -465,7 +482,7 @@ export default function App() {
                   <span>
                     {meta.icon} {meta.label}
                   </span>
-                  <b>{sec}s</b>
+                  <strong>{sec}s</strong>
                   <div className="item-bar">
                     <i style={{ width: `${pct}%`, background: meta.color }} />
                   </div>
@@ -489,9 +506,7 @@ export default function App() {
 
         {running && (snapshot.windDirection !== 0 || snapshot.windWarningDirection !== 0) && (
           <div className={`wind-banner ${snapshot.windDirection !== 0 ? 'is-active' : ''}`}>
-            <span>
-              {snapshot.windDirection !== 0 ? '🌬 強風発生中' : '⚠ 強風接近'}
-            </span>
+            <span>{snapshot.windDirection !== 0 ? '🌬 強風発生中' : '⚠ 強風接近'}</span>
             <b>
               {(snapshot.windDirection || snapshot.windWarningDirection) < 0
                 ? '← 左風'
@@ -518,7 +533,7 @@ export default function App() {
               </h1>
               <p className="lead">空の、その先へ。</p>
               <p className="intro-copy">
-                上下左右のスワイプで障害物をかわし、コインを集めて高く登ろう。
+                上下左右のスワイプで突出鉄骨・高圧放電器・ドローン機雷をかわし、エネルギーコインを集めて成層圏の彼方へ登ろう。
               </p>
               <button className="primary" onClick={begin} disabled={!ready}>
                 {ready ? 'GAME START' : 'LOADING…'}
@@ -559,6 +574,15 @@ export default function App() {
           <p>{zone}</p>
         </aside>
 
+        <footer className="footer">
+          <div className="controls-caption">
+            ← → レーン移動 <i /> ↑ ジャンプ <i /> ↓ スライド
+          </div>
+          <div className="telemetry">
+            {telemetry.fps} FPS <i /> {telemetry.modules} MODULES <i /> {telemetry.calls} DRAWS
+          </div>
+        </footer>
+
         {(tutorial || paused || settings || gameover || rankingOpen || assetModalOpen || error) && (
           <div className="overlay">
             <section
@@ -573,7 +597,7 @@ export default function App() {
                     : rankingOpen
                       ? '週間ランキング'
                       : assetModalOpen
-                        ? '差し替え素材仕様'
+                        ? '反映済み素材一覧'
                         : tutorial
                           ? '操作ガイド'
                           : settings
@@ -592,10 +616,19 @@ export default function App() {
                 </>
               ) : gameover ? (
                 <>
-                  <p className="eyebrow">
-                    {isNewPersonalBest ? '✨ NEW WEEKLY RECORD!' : 'CLIMB FINISHED'}
-                  </p>
-                  <h2>GAME OVER</h2>
+                  <div className="modal-hero-row">
+                    <img
+                      className="climber-portrait-thumb"
+                      src="/assets/images/chr_01_climber_2048x2048.png"
+                      alt="クライマー"
+                    />
+                    <div>
+                      <p className="eyebrow">
+                        {isNewPersonalBest ? '✨ NEW WEEKLY RECORD!' : 'CLIMB FINISHED'}
+                      </p>
+                      <h2>GAME OVER</h2>
+                    </div>
+                  </div>
                   {snapshot.failReason && (
                     <p className="fail-reason">{FAIL_REASON_TEXT[snapshot.failReason]}</p>
                   )}
@@ -612,7 +645,14 @@ export default function App() {
                       </strong>
                     </div>
                     <div>
-                      <span>COINS</span>
+                      <span>
+                        <img
+                          className="coin-icon-inline"
+                          src="/assets/images/item_01_energy_coin_512x512.png"
+                          alt=""
+                        />{' '}
+                        COINS
+                      </span>
                       <strong>
                         {format(snapshot.effectiveCoins)}
                         <small>枚</small>
@@ -730,23 +770,20 @@ export default function App() {
                 </>
               ) : assetModalOpen ? (
                 <>
-                  <p className="eyebrow">REPLACEABLE ASSET MANIFEST</p>
-                  <h2>自作素材（GLB・PNG・MP3/WAV）仕様</h2>
+                  <p className="eyebrow">RETRO TENSION ASSET PACK (INTEGRATED)</p>
+                  <h2>反映済み素材一覧（GLB 5種・PNG 7種・MP3 10種）</h2>
                   <div className="ranking-list">
                     <p className="subtle">
-                      <b>3Dモデル (public/assets/models/)</b>
+                      <b>3Dモデル (public/assets/models/) — 5種反映済み</b>
                     </p>
                     {MODEL_ASSETS.map(m => (
                       <div className="ranking-row" key={m.id}>
                         <span className="r-name">{m.fileName}</span>
-                        <span className="r-detail">
-                          {m.dimensionsMeters.width}×{m.dimensionsMeters.height}×
-                          {m.dimensionsMeters.depth}m
-                        </span>
+                        <span className="r-detail">{m.description}</span>
                       </div>
                     ))}
                     <p className="subtle">
-                      <b>画像 (public/assets/images/)</b>
+                      <b>2D画像・背景 (public/assets/images/) — 7種反映済み</b>
                     </p>
                     {IMAGE_ASSETS.map(img => (
                       <div className="ranking-row" key={img.id}>
@@ -757,7 +794,7 @@ export default function App() {
                       </div>
                     ))}
                     <p className="subtle">
-                      <b>音源 (public/assets/audio/)</b>
+                      <b>サウンド素材 (public/assets/audio/) — 10種反映済み</b>
                     </p>
                     {AUDIO_ASSETS.map(aud => (
                       <div className="ranking-row" key={aud.id}>
@@ -774,10 +811,19 @@ export default function App() {
                 </>
               ) : tutorial ? (
                 <>
-                  <p className="eyebrow">HOW TO CLIMB</p>
-                  <h2>画面スワイプで直感操作</h2>
+                  <div className="modal-hero-row">
+                    <img
+                      className="climber-portrait-thumb"
+                      src="/assets/images/chr_01_climber_2048x2048.png"
+                      alt="クライマー"
+                    />
+                    <div>
+                      <p className="eyebrow">HOW TO CLIMB</p>
+                      <h2>画面スワイプで直感操作</h2>
+                    </div>
+                  </div>
                   <p>
-                    画面のどこでもスワイプして操作できます。障害物をかわし、コインとアイテムを集めて高く登りましょう！
+                    画面のどこでもスワイプして操作できます。突出鉄骨・高圧放電器・ドローン機雷をかわし、エネルギーコインと特殊アイテムを集めて高く登りましょう！
                   </p>
                   <div className="guide-grid">
                     <div>
@@ -795,10 +841,12 @@ export default function App() {
                       <span>下スワイプ</span>
                       <small>スライドくぐり</small>
                     </div>
+                    <div>
+                      <b>5.0s</b>
+                      <span>特殊アイテム4種</span>
+                      <small>画面上部に残り時間表示</small>
+                    </div>
                   </div>
-                  <p className="subtle">
-                    特殊アイテム（マグネット・コイン2倍・スロー・ハイジャンプ）は効果時間が上部に表示されます。
-                  </p>
                   <button
                     className="primary"
                     onClick={event => {

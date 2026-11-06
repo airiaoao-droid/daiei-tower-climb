@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { CONFIG, PIXEL_RATIO, type Quality } from '../game/config';
 import {
   getCourseRow,
@@ -18,9 +19,9 @@ export interface Telemetry {
 
 interface PooledRowVisual {
   group: THREE.Group;
-  beamLowMeshes: THREE.Mesh[];
-  beamHighMeshes: THREE.Mesh[];
-  missingMeshes: THREE.Mesh[];
+  beamLowNodes: THREE.Object3D[];
+  beamHighNodes: THREE.Object3D[];
+  missingNodes: THREE.Object3D[];
   movingLoadGroup: THREE.Group;
   coinMeshes: THREE.Mesh[];
   itemMesh: THREE.Mesh;
@@ -36,6 +37,12 @@ export class TowerScene {
   private modules: THREE.Group[] = [];
   private rowPool: PooledRowVisual[] = [];
   private character = new THREE.Group();
+  private characterFallback = new THREE.Group();
+  private characterGlbRoot: THREE.Object3D | null = null;
+  private mixer: THREE.AnimationMixer | null = null;
+  private animActions: { climb?: THREE.AnimationAction; idle?: THREE.AnimationAction } = {};
+  private currentAnim: 'climb' | 'idle' | null = null;
+  private lastAnimTime = 0;
   private auraRing!: THREE.Mesh;
   private pickupRing!: THREE.Mesh;
   private arms: THREE.Group[] = [];
@@ -43,6 +50,8 @@ export class TowerScene {
   private clouds: THREE.Group[] = [];
   private city = new THREE.Group();
   private earthHorizon!: THREE.Mesh;
+  private bgPlanes: THREE.Mesh[] = [];
+  private spaceDome!: THREE.Mesh;
   private stars: THREE.Points;
   private windParticles: THREE.Points;
   private meteors: THREE.Mesh[] = [];
@@ -50,13 +59,15 @@ export class TowerScene {
   private sun: THREE.DirectionalLight;
   private geometries = new Set<THREE.BufferGeometry>();
   private materials = new Set<THREE.Material>();
+  private textures = new Set<THREE.Texture>();
   private resizeObserver: ResizeObserver;
   private quality: Quality;
   private sky = new THREE.Color();
-  private palette = [0xa5cbd0, 0x7db3d4, 0xd17c64, 0x0b152c].map(c => new THREE.Color(c));
+  private palette = [0x1b2f3d, 0x3b6e8c, 0x9e4f47, 0x090f24].map(c => new THREE.Color(c));
   private box = this.geometry(new THREE.BoxGeometry(1, 1, 1));
-  private sphere = this.geometry(new THREE.SphereGeometry(1, 12, 8));
-  private cylinder = this.geometry(new THREE.CylinderGeometry(0.45, 0.45, 0.16, 16));
+  private sphere = this.geometry(new THREE.SphereGeometry(1, 16, 12));
+  private cylinder = this.geometry(new THREE.CylinderGeometry(0.46, 0.46, 0.14, 6));
+  private plane = this.geometry(new THREE.PlaneGeometry(1, 1));
   private torus = this.geometry(new THREE.TorusGeometry(0.68, 0.06, 8, 24));
   private steel = this.material(0x526d77, 0.65);
   private silver = this.material(0xa4b5b8, 0.55);
@@ -75,6 +86,7 @@ export class TowerScene {
   private frames = 0;
   private sampleTime = 0;
   private fps = 0;
+  private disposed = false;
 
   constructor(private host: HTMLElement, quality: Quality) {
     this.quality = quality;
@@ -90,11 +102,13 @@ export class TowerScene {
     this.renderer.domElement.setAttribute('role', 'img');
     host.appendChild(this.renderer.domElement);
 
-    this.scene.fog = new THREE.Fog(0xa5cbd0, 58, 165);
-    this.scene.add(new THREE.HemisphereLight(0xf3f7ff, 0x657f78, 2.6));
+    this.scene.fog = new THREE.Fog(0x1b2f3d, 64, 175);
+    this.scene.add(new THREE.HemisphereLight(0xf3f7ff, 0x657f78, 2.7));
     this.sun = new THREE.DirectionalLight(0xffddb2, 3.2);
     this.sun.position.set(-18, 28, 24);
     this.scene.add(this.sun);
+
+    this.makeBackgroundLayers();
 
     for (let i = 0; i < CONFIG.moduleCount; i++) {
       const group = this.makeModule(i);
@@ -168,6 +182,8 @@ export class TowerScene {
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(host);
     this.resize();
+
+    this.loadExternalAssets();
   }
 
   private geometry<T extends THREE.BufferGeometry>(g: T): T {
@@ -195,27 +211,270 @@ export class TowerScene {
     return mesh;
   }
 
+  private makeBackgroundLayers() {
+    // 4 stage backdrop planes placed behind the tower & clouds
+    for (let i = 0; i < 4; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      });
+      this.materials.add(mat);
+      const planeMesh = this.mesh(
+        this.scene,
+        this.plane,
+        mat,
+        [0, 14, -88 - i * 0.5],
+        [145, 145, 1]
+      );
+      planeMesh.visible = false;
+      this.bgPlanes.push(planeMesh);
+    }
+
+    const domeMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      side: THREE.BackSide,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+    });
+    this.materials.add(domeMat);
+    this.spaceDome = this.mesh(this.scene, this.sphere, domeMat, [0, 8, -10], [150, 150, 150]);
+    this.spaceDome.visible = false;
+  }
+
+  private loadExternalAssets() {
+    if (typeof window === 'undefined') return;
+
+    const texLoader = new THREE.TextureLoader();
+    const bgPaths = [
+      '/assets/images/bg_01_ground_1920x1080.png',
+      '/assets/images/bg_02_bluesky_clouds_1920x1080.png',
+      '/assets/images/bg_03_sunset_cloudsea_1920x1080.png',
+      '/assets/images/bg_04_space_stars_1920x1080.png',
+    ];
+    bgPaths.forEach((path, idx) => {
+      texLoader.load(
+        path,
+        tex => {
+          if (this.disposed) {
+            tex.dispose();
+            return;
+          }
+          tex.colorSpace = THREE.SRGBColorSpace;
+          this.textures.add(tex);
+          const planeMesh = this.bgPlanes[idx];
+          if (planeMesh) {
+            const mat = planeMesh.material as THREE.MeshBasicMaterial;
+            mat.map = tex;
+            mat.needsUpdate = true;
+            planeMesh.visible = true;
+          }
+        },
+        undefined,
+        () => {}
+      );
+    });
+
+    texLoader.load(
+      '/assets/images/bg_04_space_stars_2048x1024.png',
+      tex => {
+        if (this.disposed) {
+          tex.dispose();
+          return;
+        }
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = THREE.RepeatWrapping;
+        this.textures.add(tex);
+        const mat = this.spaceDome.material as THREE.MeshBasicMaterial;
+        mat.map = tex;
+        mat.needsUpdate = true;
+      },
+      undefined,
+      () => {}
+    );
+
+    texLoader.load(
+      '/assets/images/item_01_energy_coin_512x512.png',
+      tex => {
+        if (this.disposed) {
+          tex.dispose();
+          return;
+        }
+        tex.colorSpace = THREE.SRGBColorSpace;
+        this.textures.add(tex);
+        this.gold.map = tex;
+        this.gold.color.setHex(0xffffff);
+        this.gold.metalness = 0.35;
+        this.gold.roughness = 0.35;
+        this.gold.needsUpdate = true;
+      },
+      undefined,
+      () => {}
+    );
+
+    const gltfLoader = new GLTFLoader();
+
+    // 1. Character 3D Model (chr_01_climber_rigged.glb)
+    gltfLoader.load(
+      '/assets/models/chr_01_climber_rigged.glb',
+      gltf => {
+        if (this.disposed) return;
+        const model = gltf.scene;
+        model.position.set(0, 0, 0);
+        model.scale.set(1.05, 1.05, 1.05);
+        this.character.add(model);
+        this.characterGlbRoot = model;
+        this.characterFallback.visible = false;
+
+        if (gltf.animations && gltf.animations.length > 0) {
+          this.mixer = new THREE.AnimationMixer(model);
+          const climbClip =
+            THREE.AnimationClip.findByName(gltf.animations, 'Climb_Run_Loop') ?? gltf.animations[0];
+          const idleClip =
+            THREE.AnimationClip.findByName(gltf.animations, 'Idle_Ready_Loop') ?? gltf.animations[0];
+          if (climbClip) {
+            this.animActions.climb = this.mixer.clipAction(climbClip);
+          }
+          if (idleClip) {
+            this.animActions.idle = this.mixer.clipAction(idleClip);
+          }
+          this.switchCharacterAnimation('idle');
+        }
+      },
+      undefined,
+      () => {}
+    );
+
+    // 2. Tower Base Section 3D Model (st_01_tower_base_10m.glb)
+    gltfLoader.load(
+      '/assets/models/st_01_tower_base_10m.glb',
+      gltf => {
+        if (this.disposed) return;
+        const template = gltf.scene;
+        for (const modGroup of this.modules) {
+          const clone = template.clone(true);
+          // Scale 10m tower section to seamlessly match the 8m module height and 3-lane width
+          clone.position.set(0, 0, 0);
+          clone.scale.set(2.2, 0.8, 1.1);
+          modGroup.add(clone);
+        }
+      },
+      undefined,
+      () => {}
+    );
+
+    // 3. Obstacle 01: Broken Girder (obs_01_broken_girder.glb) -> beam_low & beam_high
+    gltfLoader.load(
+      '/assets/models/obs_01_broken_girder.glb',
+      gltf => {
+        if (this.disposed) return;
+        const template = gltf.scene;
+        for (const rowVis of this.rowPool) {
+          for (let lane = 0; lane < 3; lane++) {
+            const lowNode = rowVis.beamLowNodes[lane] as THREE.Group;
+            lowNode.clear();
+            const lowClone = template.clone(true);
+            lowClone.scale.set(0.88, 0.95, 0.95);
+            lowNode.add(lowClone);
+
+            const highNode = rowVis.beamHighNodes[lane] as THREE.Group;
+            highNode.clear();
+            const highClone = template.clone(true);
+            highClone.scale.set(0.92, 1.25, 1.05);
+            highNode.add(highClone);
+          }
+        }
+      },
+      undefined,
+      () => {}
+    );
+
+    // 4. Obstacle 02: High Voltage Coil (obs_02_high_voltage_coil.glb) -> missing_foothold hazard
+    gltfLoader.load(
+      '/assets/models/obs_02_high_voltage_coil.glb',
+      gltf => {
+        if (this.disposed) return;
+        const template = gltf.scene;
+        for (const rowVis of this.rowPool) {
+          for (let lane = 0; lane < 3; lane++) {
+            const missNode = rowVis.missingNodes[lane] as THREE.Group;
+            missNode.clear();
+            const coilClone = template.clone(true);
+            coilClone.position.set(0, -0.35, 0.15);
+            coilClone.scale.set(1.15, 0.88, 1.15);
+            missNode.add(coilClone);
+          }
+        }
+      },
+      undefined,
+      () => {}
+    );
+
+    // 5. Obstacle 03: Patrol Mine (obs_03_patrol_mine.glb) -> moving_load
+    gltfLoader.load(
+      '/assets/models/obs_03_patrol_mine.glb',
+      gltf => {
+        if (this.disposed) return;
+        const template = gltf.scene;
+        for (const rowVis of this.rowPool) {
+          rowVis.movingLoadGroup.clear();
+          const mineClone = template.clone(true);
+          mineClone.position.set(0, 0.95, 2.95);
+          mineClone.scale.set(1.08, 1.08, 1.08);
+          rowVis.movingLoadGroup.add(mineClone);
+        }
+      },
+      undefined,
+      () => {}
+    );
+  }
+
+  private switchCharacterAnimation(target: 'climb' | 'idle') {
+    if (!this.mixer || this.currentAnim === target) return;
+    const nextAction = this.animActions[target];
+    const prevAction = this.currentAnim ? this.animActions[this.currentAnim] : undefined;
+    if (nextAction) {
+      nextAction.reset().fadeIn(0.15).play();
+      if (prevAction && prevAction !== nextAction) {
+        prevAction.fadeOut(0.15);
+      }
+      this.currentAnim = target;
+    }
+  }
+
   private makePooledRow(): PooledRowVisual {
     const group = new THREE.Group();
     group.visible = false;
 
-    const beamLowMeshes: THREE.Mesh[] = [];
-    const beamHighMeshes: THREE.Mesh[] = [];
-    const missingMeshes: THREE.Mesh[] = [];
+    const beamLowNodes: THREE.Object3D[] = [];
+    const beamHighNodes: THREE.Object3D[] = [];
+    const missingNodes: THREE.Object3D[] = [];
 
     for (let lane = 0; lane < 3; lane++) {
       const lx = laneToX(lane);
-      const low = this.mesh(group, this.box, this.orange, [lx, 0.32, 2.75], [1.95, 0.36, 0.42]);
-      low.visible = false;
-      beamLowMeshes.push(low);
 
-      const high = this.mesh(group, this.box, this.hazardYellow, [lx, 1.55, 2.85], [2.05, 0.68, 0.48]);
-      high.visible = false;
-      beamHighMeshes.push(high);
+      const lowGroup = new THREE.Group();
+      lowGroup.position.set(lx, 0.32, 2.75);
+      lowGroup.visible = false;
+      this.mesh(lowGroup, this.box, this.orange, [0, 0, 0], [1.95, 0.36, 0.42]);
+      group.add(lowGroup);
+      beamLowNodes.push(lowGroup);
 
-      const miss = this.mesh(group, this.box, this.dangerRed, [lx, 0.05, 2.42], [1.55, 0.95, 0.22]);
-      miss.visible = false;
-      missingMeshes.push(miss);
+      const highGroup = new THREE.Group();
+      highGroup.position.set(lx, 1.55, 2.85);
+      highGroup.visible = false;
+      this.mesh(highGroup, this.box, this.hazardYellow, [0, 0, 0], [2.05, 0.68, 0.48]);
+      group.add(highGroup);
+      beamHighNodes.push(highGroup);
+
+      const missGroup = new THREE.Group();
+      missGroup.position.set(lx, 0.05, 2.42);
+      missGroup.visible = false;
+      this.mesh(missGroup, this.box, this.dangerRed, [0, 0, 0], [1.55, 0.95, 0.22]);
+      group.add(missGroup);
+      missingNodes.push(missGroup);
     }
 
     const movingLoadGroup = new THREE.Group();
@@ -237,9 +496,9 @@ export class TowerScene {
 
     return {
       group,
-      beamLowMeshes,
-      beamHighMeshes,
-      missingMeshes,
+      beamLowNodes,
+      beamHighNodes,
+      missingNodes,
       movingLoadGroup,
       coinMeshes,
       itemMesh,
@@ -289,30 +548,33 @@ export class TowerScene {
   }
 
   private makeCharacter() {
-    this.mesh(this.character, this.sphere, this.orange, [0, 0.9, 0], [0.43, 0.58, 0.28]);
-    this.mesh(this.character, this.box, this.navy, [0, 0.9, 0.26], [0.48, 0.65, 0.19]);
-    this.mesh(this.character, this.box, this.cream, [0, 1, 0.37], [0.32, 0.1, 0.025]);
-    this.mesh(this.character, this.sphere, this.cream, [0, 1.65, 0], [0.36, 0.33, 0.33]);
-    this.mesh(this.character, this.sphere, this.orange, [0, 1.8, 0], [0.43, 0.28, 0.4]);
-    this.mesh(this.character, this.box, this.orange, [0, 1.71, -0.2], [0.85, 0.07, 0.65]);
-    this.auraRing = this.mesh(this.character, this.torus, this.itemMaterials.magnet, [0, 0.95, 0], [1, 1, 1]);
-    this.auraRing.visible = false;
-    this.pickupRing = this.mesh(this.character, this.torus, this.gold, [0, 1.0, 0.25], [1, 1, 1]);
-    this.pickupRing.visible = false;
+    this.character.add(this.characterFallback);
+    this.mesh(this.characterFallback, this.sphere, this.orange, [0, 0.9, 0], [0.43, 0.58, 0.28]);
+    this.mesh(this.characterFallback, this.box, this.navy, [0, 0.9, 0.26], [0.48, 0.65, 0.19]);
+    this.mesh(this.characterFallback, this.box, this.cream, [0, 1, 0.37], [0.32, 0.1, 0.025]);
+    this.mesh(this.characterFallback, this.sphere, this.cream, [0, 1.65, 0], [0.36, 0.33, 0.33]);
+    this.mesh(this.characterFallback, this.sphere, this.orange, [0, 1.8, 0], [0.43, 0.28, 0.4]);
+    this.mesh(this.characterFallback, this.box, this.orange, [0, 1.71, -0.2], [0.85, 0.07, 0.65]);
+
     for (const side of [-1, 1]) {
       const arm = new THREE.Group();
       arm.position.set(side * 0.39, 1.2, 0);
-      this.character.add(arm);
+      this.characterFallback.add(arm);
       this.mesh(arm, this.sphere, this.orange, [side * 0.12, -0.24, 0], [0.15, 0.4, 0.15]);
       this.mesh(arm, this.sphere, this.navy, [side * 0.15, -0.55, 0], [0.16, 0.17, 0.17]);
       this.arms.push(arm);
       const leg = new THREE.Group();
       leg.position.set(side * 0.23, 0.45, 0);
-      this.character.add(leg);
+      this.characterFallback.add(leg);
       this.mesh(leg, this.sphere, this.navy, [0, -0.35, 0], [0.19, 0.42, 0.2]);
       this.mesh(leg, this.box, this.navy, [0, -0.67, -0.1], [0.31, 0.19, 0.45]);
       this.legs.push(leg);
     }
+
+    this.auraRing = this.mesh(this.character, this.torus, this.itemMaterials.magnet, [0, 0.95, 0], [1, 1, 1]);
+    this.auraRing.visible = false;
+    this.pickupRing = this.mesh(this.character, this.torus, this.gold, [0, 1.0, 0.25], [1, 1, 1]);
+    this.pickupRing.visible = false;
   }
 
   private makeCity() {
@@ -378,20 +640,21 @@ export class TowerScene {
       slot.group.position.set(0, rowY, 0);
 
       for (let l = 0; l < 3; l++) {
-        slot.beamLowMeshes[l].visible = false;
-        slot.beamHighMeshes[l].visible = false;
-        slot.missingMeshes[l].visible = false;
+        slot.beamLowNodes[l].visible = false;
+        slot.beamHighNodes[l].visible = false;
+        slot.missingNodes[l].visible = false;
       }
 
       for (const obs of row.obstacles) {
-        if (obs.type === 'beam_low') slot.beamLowMeshes[obs.lane].visible = true;
-        else if (obs.type === 'beam_high') slot.beamHighMeshes[obs.lane].visible = true;
-        else if (obs.type === 'missing_foothold') slot.missingMeshes[obs.lane].visible = true;
+        if (obs.type === 'beam_low') slot.beamLowNodes[obs.lane].visible = true;
+        else if (obs.type === 'beam_high') slot.beamHighNodes[obs.lane].visible = true;
+        else if (obs.type === 'missing_foothold') slot.missingNodes[obs.lane].visible = true;
       }
 
       if (row.movingLoad) {
         slot.movingLoadGroup.visible = true;
         slot.movingLoadGroup.position.x = movingLoadX(row.movingLoad, state.tick);
+        slot.movingLoadGroup.position.y = Math.sin(tSeconds * 5 + rowIndex) * 0.12;
       } else {
         slot.movingLoadGroup.visible = false;
       }
@@ -461,6 +724,16 @@ export class TowerScene {
         0.18
       : 0;
 
+    // Update GLB animation mixer if loaded
+    if (this.mixer) {
+      const targetAnim = state.status === 'running' ? 'climb' : 'idle';
+      this.switchCharacterAnimation(targetAnim);
+      const dt = this.lastAnimTime > 0 ? Math.min(0.1, (now - this.lastAnimTime) / 1000) : 1 / 60;
+      this.lastAnimTime = now;
+      const speedScale = state.status === 'running' ? (state.items.slow > 0 ? 0.65 : 1.35) : 1.0;
+      this.mixer.update(dt * speedScale);
+    }
+
     // Active item aura ring
     const activeItemKey = (['high_jump', 'magnet', 'double', 'slow'] as const).find(
       k => state.items[k] > 0
@@ -485,11 +758,13 @@ export class TowerScene {
       this.pickupRing.visible = false;
     }
 
-    for (let i = 0; i < 2; i++) {
-      this.arms[i].rotation.x =
-        state.motion === 'climb' ? -1.7 + Math.sin(t * 8 + i * Math.PI) * 0.65 : -2.2 + slide;
-      this.legs[i].rotation.x =
-        state.motion === 'climb' ? Math.sin(t * 8 + i * Math.PI) * 0.5 : -jump * 0.6;
+    if (this.characterFallback.visible) {
+      for (let i = 0; i < 2; i++) {
+        this.arms[i].rotation.x =
+          state.motion === 'climb' ? -1.7 + Math.sin(t * 8 + i * Math.PI) * 0.65 : -2.2 + slide;
+        this.legs[i].rotation.x =
+          state.motion === 'climb' ? Math.sin(t * 8 + i * Math.PI) * 0.5 : -jump * 0.6;
+      }
     }
 
     this.renderCourseRows(state, altitude, t);
@@ -515,10 +790,10 @@ export class TowerScene {
     const windDir = state.windDirection || state.windWarningDirection;
     windMat.opacity = state.windDirection !== 0 ? 0.72 : state.windWarningDirection !== 0 ? 0.35 : 0;
     if (windDir !== 0) {
-      this.windParticles.position.x = ((t * 14 * windDir) % 6);
+      this.windParticles.position.x = (t * 14 * windDir) % 6;
     }
 
-    // 4-stage altitude sky & sun transition (0-100m, 100-300m, 300-500m, 500m+)
+    // 4-stage altitude sky & background art transition (0-100m, 100-300m, 300-500m, 500m+)
     let stage = 0;
     let blend = 0;
     if (altitude > 70) {
@@ -536,6 +811,25 @@ export class TowerScene {
     this.sky.copy(this.palette[stage]).lerp(this.palette[stage + 1], blend);
     this.scene.background = this.sky;
     (this.scene.fog as THREE.Fog).color.copy(this.sky);
+
+    // Update backdrop image plane opacities for each stage
+    const weights = [0, 0, 0, 0];
+    weights[stage] = 1 - blend;
+    weights[Math.min(3, stage + 1)] += blend;
+    this.bgPlanes.forEach((planeMesh, idx) => {
+      const mat = planeMesh.material as THREE.MeshBasicMaterial;
+      if (mat.map) {
+        mat.opacity = weights[idx] * 0.85;
+        planeMesh.visible = mat.opacity > 0.01;
+      }
+    });
+
+    const domeMat = this.spaceDome.material as THREE.MeshBasicMaterial;
+    if (domeMat.map) {
+      domeMat.opacity = weights[3] * 0.75;
+      this.spaceDome.visible = domeMat.opacity > 0.01;
+      this.spaceDome.rotation.y = t * 0.015;
+    }
 
     (this.stars.material as THREE.PointsMaterial).opacity = THREE.MathUtils.smoothstep(
       altitude,
@@ -571,13 +865,19 @@ export class TowerScene {
   }
 
   dispose() {
+    this.disposed = true;
     this.resizeObserver.disconnect();
     this.renderer.setAnimationLoop(null);
+    if (this.mixer && this.characterGlbRoot) {
+      this.mixer.stopAllAction();
+      this.mixer.uncacheRoot(this.characterGlbRoot);
+    }
     this.scene.traverse(object => {
       if (object instanceof THREE.InstancedMesh) object.dispose();
     });
     this.geometries.forEach(g => g.dispose());
     this.materials.forEach(m => m.dispose());
+    this.textures.forEach(t => t.dispose());
     this.scene.clear();
     this.renderer.dispose();
     this.renderer.forceContextLoss();

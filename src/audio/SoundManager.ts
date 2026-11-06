@@ -11,15 +11,31 @@ export interface AudioSettings {
 
 const STORAGE_KEY = 'daiei-climb.audio.v1';
 
+const SE_PATH_MAP: Record<SoundEffectId, string> = {
+  coin: '/assets/audio/se-coin.mp3',
+  jump: '/assets/audio/se-jump.mp3',
+  land: '/assets/audio/se-land.mp3',
+  lane: '/assets/audio/se-lane-move.mp3',
+  item: '/assets/audio/se-item-get.mp3',
+  gameover: '/assets/audio/se-gameover.mp3',
+  newrecord: '/assets/audio/se-new-record.mp3',
+};
+
+const BGM_PATH_MAP: Record<Exclude<BgmZone, 'none'>, string> = {
+  normal: '/assets/audio/bgm-climb-normal.mp3',
+  space: '/assets/audio/bgm-climb-space.mp3',
+};
+
+const WIND_AMBIENCE_PATH = '/assets/audio/ambience-wind-loop.mp3';
+
 export class SoundManager {
   private ctx: AudioContext | null = null;
   private settings: AudioSettings = { bgmVolume: 0.55, seVolume: 0.75, muted: false };
   private bgmZone: BgmZone = 'none';
   private paused = false;
   private windLevel = 0;
-  private bgmTimer: number | null = null;
-  private stepNote = 0;
   private htmlAudios = new Map<string, HTMLAudioElement>();
+  private sePool = new Map<SoundEffectId, HTMLAudioElement[]>();
 
   constructor() {
     try {
@@ -35,6 +51,37 @@ export class SoundManager {
     } catch {
       // Ignore storage errors in private mode
     }
+    this.preloadAudioElements();
+  }
+
+  private preloadAudioElements() {
+    if (typeof window === 'undefined' || typeof Audio === 'undefined') return;
+    try {
+      for (const [zone, path] of Object.entries(BGM_PATH_MAP)) {
+        const audio = new Audio(path);
+        audio.loop = true;
+        audio.preload = 'auto';
+        this.htmlAudios.set(`bgm_${zone}`, audio);
+      }
+
+      const windAudio = new Audio(WIND_AMBIENCE_PATH);
+      windAudio.loop = true;
+      windAudio.preload = 'auto';
+      this.htmlAudios.set('ambience_wind', windAudio);
+
+      for (const [seId, path] of Object.entries(SE_PATH_MAP) as [SoundEffectId, string][]) {
+        const pool: HTMLAudioElement[] = [];
+        for (let i = 0; i < 3; i++) {
+          const a = new Audio(path);
+          a.preload = 'auto';
+          pool.push(a);
+        }
+        this.sePool.set(seId, pool);
+      }
+      this.syncHtmlAudioVolumes();
+    } catch {
+      // Ignore in non-browser test environments
+    }
   }
 
   getSettings(): AudioSettings {
@@ -49,52 +96,97 @@ export class SoundManager {
       // Ignore storage errors
     }
     this.syncHtmlAudioVolumes();
+    this.syncPlaybackState();
   }
 
   unlock() {
     if (typeof window === 'undefined') return;
-    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioCtx) return;
-    if (!this.ctx) {
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (AudioCtx && !this.ctx) {
       try {
         this.ctx = new AudioCtx();
       } catch {
-        return;
+        // Ignore
       }
     }
-    if (this.ctx.state === 'suspended') {
+    if (this.ctx && this.ctx.state === 'suspended') {
       this.ctx.resume().catch(() => {});
     }
+    this.syncPlaybackState();
   }
 
   setPaused(paused: boolean) {
     this.paused = paused;
-    for (const audio of this.htmlAudios.values()) {
-      if (paused) audio.pause();
-    }
+    this.syncPlaybackState();
   }
 
   setBgmZone(zone: BgmZone, windStrength = 0) {
-    this.windLevel = windStrength;
-    if (this.bgmZone === zone) return;
+    const zoneChanged = this.bgmZone !== zone;
     this.bgmZone = zone;
-    if (this.bgmTimer !== null && typeof window !== 'undefined') {
-      window.clearInterval(this.bgmTimer);
-      this.bgmTimer = null;
-    }
-    if (zone === 'none' || typeof window === 'undefined') return;
+    this.windLevel = windStrength;
 
-    this.bgmTimer = window.setInterval(() => {
-      if (this.paused || this.settings.muted || this.settings.bgmVolume <= 0.01) return;
-      this.playProceduralBgmPulse();
-    }, zone === 'space' ? 520 : 360);
+    if (zoneChanged) {
+      for (const key of ['bgm_normal', 'bgm_space']) {
+        const audio = this.htmlAudios.get(key);
+        if (audio && key !== `bgm_${zone}`) {
+          audio.pause();
+          audio.currentTime = 0;
+        }
+      }
+    }
+    this.syncPlaybackState();
+  }
+
+  private syncPlaybackState() {
+    const canPlay = !this.paused && !this.settings.muted;
+    for (const zone of ['normal', 'space'] as const) {
+      const audio = this.htmlAudios.get(`bgm_${zone}`);
+      if (!audio) continue;
+      audio.volume = this.settings.muted ? 0 : this.settings.bgmVolume;
+      if (canPlay && this.bgmZone === zone && this.settings.bgmVolume > 0.01) {
+        if (audio.paused) {
+          audio.play().catch(() => {});
+        }
+      } else if (!audio.paused) {
+        audio.pause();
+      }
+    }
+
+    const windAudio = this.htmlAudios.get('ambience_wind');
+    if (windAudio) {
+      windAudio.volume = this.settings.muted ? 0 : Math.min(1, this.settings.seVolume * 0.65);
+      if (canPlay && this.bgmZone !== 'none' && this.windLevel !== 0 && this.settings.seVolume > 0.01) {
+        if (windAudio.paused) {
+          windAudio.play().catch(() => {});
+        }
+      } else if (!windAudio.paused) {
+        windAudio.pause();
+      }
+    }
   }
 
   playSe(effect: SoundEffectId) {
     if (this.paused || this.settings.muted || this.settings.seVolume <= 0.01) return;
     this.unlock();
-    if (!this.ctx) return;
 
+    const pool = this.sePool.get(effect);
+    if (pool && pool.length > 0) {
+      const target = pool.find(a => a.paused || a.ended) ?? pool[0];
+      target.volume = this.settings.seVolume;
+      target.currentTime = 0;
+      target.play().catch(() => {
+        this.playSynthFallback(effect);
+      });
+      return;
+    }
+
+    this.playSynthFallback(effect);
+  }
+
+  private playSynthFallback(effect: SoundEffectId) {
+    if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const gainValue = this.settings.seVolume * 0.18;
 
@@ -127,21 +219,6 @@ export class SoundManager {
       case 'gameover':
         this.sweep(310, 110, now, 0.42, 'sawtooth', gainValue * 0.85);
         break;
-    }
-  }
-
-  private playProceduralBgmPulse() {
-    if (!this.ctx || this.ctx.state !== 'running') return;
-    const now = this.ctx.currentTime;
-    const vol = this.settings.bgmVolume * 0.05;
-    const normalScale = [261.63, 329.63, 392.0, 440.0, 392.0, 329.63, 293.66, 349.23];
-    const spaceScale = [220.0, 277.18, 329.63, 440.0, 493.88, 440.0, 329.63, 246.94];
-    const scale = this.bgmZone === 'space' ? spaceScale : normalScale;
-    const freq = scale[this.stepNote % scale.length];
-    this.stepNote++;
-    this.tone(freq, now, this.bgmZone === 'space' ? 0.38 : 0.22, 'sine', vol);
-    if (this.windLevel !== 0 && this.stepNote % 2 === 0) {
-      this.sweep(180, 230, now, 0.25, 'sine', vol * 0.65);
     }
   }
 
@@ -185,15 +262,22 @@ export class SoundManager {
   private syncHtmlAudioVolumes() {
     for (const [id, audio] of this.htmlAudios.entries()) {
       const spec = AUDIO_ASSETS.find(a => a.id === id);
-      const base = spec?.category === 'bgm' ? this.settings.bgmVolume : this.settings.seVolume;
-      audio.volume = this.settings.muted ? 0 : base;
+      const base = spec?.category === 'bgm' ? this.settings.bgmVolume : this.settings.seVolume * 0.65;
+      audio.volume = this.settings.muted ? 0 : Math.max(0, Math.min(1, base));
+    }
+    for (const pool of this.sePool.values()) {
+      for (const a of pool) {
+        a.volume = this.settings.muted ? 0 : Math.max(0, Math.min(1, this.settings.seVolume));
+      }
     }
   }
 
   dispose() {
-    if (this.bgmTimer !== null && typeof window !== 'undefined') {
-      window.clearInterval(this.bgmTimer);
-      this.bgmTimer = null;
+    for (const audio of this.htmlAudios.values()) {
+      audio.pause();
+    }
+    for (const pool of this.sePool.values()) {
+      for (const a of pool) a.pause();
     }
     if (this.ctx) {
       this.ctx.close().catch(() => {});

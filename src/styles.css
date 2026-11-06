@@ -932,3 +932,48 @@ button:hover:not(:disabled) {
     transition: none;
   }
 }
+
+/* Custom Retro Tension Asset UI Elements */
+.brand-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid #f49b6188;
+  background: #10242ecc;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.hud-coin-label {
+  display: flex !important;
+  align-items: center;
+  gap: 4px;
+}
+
+.coin-icon-inline {
+  width: 13px;
+  height: 13px;
+  object-fit: contain;
+  vertical-align: middle;
+}
+
+.modal-hero-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.modal-hero-row h2 {
+  margin: 4px 0 0;
+}
+
+.climber-portrait-thumb {
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+  border: 1px solid #f49b6166;
+  background: #10222c;
+  object-fit: contain;
+  flex-shrink: 0;
+}
