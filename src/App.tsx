@@ -129,6 +129,15 @@ export default function App() {
     };
   }, [refreshRanking]);
 
+  useEffect(() => {
+    if (!rankingOpen) return;
+    refreshRanking(session.current.state.courseId);
+    const timer = window.setInterval(() => {
+      refreshRanking(session.current.state.courseId);
+    }, 8000);
+    return () => window.clearInterval(timer);
+  }, [rankingOpen, refreshRanking]);
+
   const handleGameOverSubmit = useCallback(async () => {
     const current = session.current;
     if (current.submitted) return;
@@ -533,7 +542,7 @@ export default function App() {
               </h1>
               <p className="lead">空の、その先へ。</p>
               <p className="intro-copy">
-                上下左右のスワイプで突出鉄骨・高圧放電器・ドローン機雷をかわし、エネルギーコインを集めて成層圏の彼方へ登ろう。
+                障害物をかわし、コインを集めて、どこまでも登ろう。
               </p>
               <button className="primary" onClick={begin} disabled={!ready}>
                 {ready ? 'GAME START' : 'LOADING…'}
@@ -548,12 +557,6 @@ export default function App() {
                   }}
                 >
                   🏆 週間ランキング
-                </button>
-                <button className="secondary-inline" onClick={() => setTutorial(true)}>
-                  操作ガイド
-                </button>
-                <button className="secondary-inline" onClick={() => setAssetModalOpen(true)}>
-                  素材仕様
                 </button>
               </div>
               <div className="intro-meta">
