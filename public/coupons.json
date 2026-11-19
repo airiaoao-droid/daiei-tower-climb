@@ -1,7 +1,7 @@
 [
   {
     "id": "sample-1",
-    "image": "/coupons/sample-1.svg",
+    "image": "/coupons/daiei-craft.jpg",
     "title": "サンプルクーポン A",
     "benefit": "（特典内容をここに記載）",
     "conditions": ["（利用条件をここに記載）"],
@@ -10,7 +10,7 @@
   },
   {
     "id": "sample-2",
-    "image": "/coupons/sample-2.svg",
+    "image": "/coupons/tower-climbing-event.png",
     "title": "サンプルクーポン B",
     "benefit": "（特典内容をここに記載）",
     "conditions": ["（利用条件をここに記載）"],
