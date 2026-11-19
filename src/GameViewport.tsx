@@ -89,7 +89,8 @@ export default function GameViewport({
       }
 
       scene.render(game.state, now);
-      if (now - lastHud > 80) {
+      const hudIntervalMs = game.state.status === 'running' ? 140 : 250;
+      if (now - lastHud > hudIntervalMs) {
         onSnapshot({ ...game.state });
         onTelemetry(scene.telemetry());
         lastHud = now;

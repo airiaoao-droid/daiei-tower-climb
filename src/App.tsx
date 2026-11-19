@@ -72,6 +72,15 @@ function makeSession(running: boolean): Session {
   };
 }
 
+function isMobileDevice(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    window.matchMedia?.('(pointer: coarse)').matches ||
+    window.innerWidth <= 820 ||
+    /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+  );
+}
+
 export default function App() {
   const playerId = useRef<string>(getOrCreatePlayerId());
   const sound = useRef<SoundManager | null>(null);
@@ -87,7 +96,7 @@ export default function App() {
   const [settings, setSettings] = useState(false);
   const [rankingOpen, setRankingOpen] = useState(false);
   const [assetModalOpen, setAssetModalOpen] = useState(false);
-  const [quality, setQuality] = useState<Quality>('medium');
+  const [quality, setQuality] = useState<Quality>(() => (isMobileDevice() ? 'low' : 'medium'));
   const [autoQuality, setAutoQuality] = useState(true);
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(
     () => sound.current?.getSettings() ?? { bgmVolume: 0.55, seVolume: 0.75, muted: false }
@@ -193,9 +202,9 @@ export default function App() {
   // Automatic quality adjustment based on measured FPS
   useEffect(() => {
     if (!autoQuality || snapshot.status !== 'running' || telemetry.fps <= 0) return;
-    if (telemetry.fps < 26 && quality !== 'low') {
+    if (telemetry.fps < 42 && quality !== 'low') {
       setQuality('low');
-    } else if (telemetry.fps < 42 && quality === 'high') {
+    } else if (telemetry.fps < 52 && quality === 'high') {
       setQuality('medium');
     }
   }, [autoQuality, telemetry.fps, quality, snapshot.status]);
@@ -595,16 +604,16 @@ export default function App() {
               aria-label={
                 error
                   ? '描画エラー'
-                  : gameover
-                    ? 'ゲームオーバー'
-                    : rankingOpen
-                      ? '週間ランキング'
-                      : assetModalOpen
-                        ? '反映済み素材一覧'
-                        : tutorial
-                          ? '操作ガイド'
-                          : settings
-                            ? '設定'
+                  : rankingOpen
+                    ? '週間ランキング'
+                    : assetModalOpen
+                      ? '反映済み素材一覧'
+                      : settings
+                        ? '設定'
+                        : gameover
+                          ? 'ゲームオーバー'
+                          : tutorial
+                            ? '操作ガイド'
                             : '一時停止'
               }
             >
@@ -615,6 +624,80 @@ export default function App() {
                   <p>{error}</p>
                   <button className="primary" onClick={() => window.location.reload()}>
                     再読み込み ↗
+                  </button>
+                </>
+              ) : rankingOpen ? (
+                <>
+                  <p className="eyebrow">WEEKLY LEADERBOARD (JST MONDAY 00:00)</p>
+                  <h2>週間TOP100ランキング</h2>
+                  <p className="subtle">
+                    対象週: <b>{snapshot.courseId}</b>（毎週月曜0:00 JST切替・同一シードコース）
+                  </p>
+
+                  {rankingStatus === 'error' && (
+                    <p className="fail-reason">
+                      共有ランキングサーバーへの接続を確認中です。通信状況をご確認のうえ再取得してください。
+                    </p>
+                  )}
+
+                  {rankingView && rankingView.podium.length > 0 && (
+                    <div className="podium-grid" aria-label="上位3名表彰台">
+                      {rankingView.podium.map(p => (
+                        <div className={`podium-card rank-${p.rank}`} key={p.playerId}>
+                          <span className="medal">
+                            {p.rank === 1 ? '🥇 1st' : p.rank === 2 ? '🥈 2nd' : '🥉 3rd'}
+                          </span>
+                          <strong>{p.nickname}</strong>
+                          <b>{format(p.score)} pt</b>
+                          <small>
+                            {format(p.altitudeMeters)}m × {format(p.effectiveCoins)}枚
+                          </small>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="ranking-list" role="region" aria-label="4位〜100位一覧">
+                    {rankingView && rankingView.top100.length > 3 ? (
+                      rankingView.top100.slice(3).map(entry => (
+                        <div
+                          className={`ranking-row ${entry.playerId === (rankingView.myRecord?.playerId ?? playerId.current) ? 'is-me' : ''}`}
+                          key={entry.playerId}
+                        >
+                          <span className="r-rank">#{entry.rank}</span>
+                          <span className="r-name">{entry.nickname}</span>
+                          <span className="r-detail">
+                            {format(entry.altitudeMeters)}m / {format(entry.effectiveCoins)}枚
+                          </span>
+                          <strong className="r-score">{format(entry.score)}</strong>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="subtle">
+                        {rankingView && rankingView.top100.length > 0
+                          ? '4位以下の記録はまだありません。'
+                          : 'まだ公開登録された週間記録はありません。ニックネームを登録して1位を獲得しましょう！'}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="my-rank-bar">
+                    <span>今週の自己ベスト:</span>
+                    {rankingView?.myRecord ? (
+                      <b>
+                        {rankingView.myRecord.rank
+                          ? `${rankingView.myRecord.rank}位`
+                          : '未公開（仮記録）'}{' '}
+                        / {format(rankingView.myRecord.score)}点
+                      </b>
+                    ) : (
+                      <b>未記録</b>
+                    )}
+                  </div>
+
+                  <button className="primary" onClick={() => setRankingOpen(false)}>
+                    {gameover ? '結果画面へ戻る' : '閉じる'}
+                    <span>↩</span>
                   </button>
                 </>
               ) : gameover ? (
@@ -704,72 +787,19 @@ export default function App() {
                     もう一度登る（即時再挑戦）<span>↻</span>
                   </button>
                   <div className="panel-links">
-                    <button onClick={() => setRankingOpen(true)}>🏆 週間ランキングを見る</button>
-                    <button onClick={home}>タイトルへ戻る</button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        refreshRanking(snapshot.courseId);
+                        setRankingOpen(true);
+                      }}
+                    >
+                      🏆 週間ランキングを見る
+                    </button>
+                    <button type="button" onClick={home}>
+                      タイトルへ戻る
+                    </button>
                   </div>
-                </>
-              ) : rankingOpen ? (
-                <>
-                  <p className="eyebrow">WEEKLY LEADERBOARD (JST MONDAY 00:00)</p>
-                  <h2>週間TOP100ランキング</h2>
-                  <p className="subtle">
-                    対象週: <b>{snapshot.courseId}</b>（毎週月曜0:00 JST切替・同一シードコース）
-                  </p>
-
-                  {rankingView && rankingView.podium.length > 0 && (
-                    <div className="podium-grid" aria-label="上位3名表彰台">
-                      {rankingView.podium.map(p => (
-                        <div className={`podium-card rank-${p.rank}`} key={p.playerId}>
-                          <span className="medal">
-                            {p.rank === 1 ? '🥇 1st' : p.rank === 2 ? '🥈 2nd' : '🥉 3rd'}
-                          </span>
-                          <strong>{p.nickname}</strong>
-                          <b>{format(p.score)} pt</b>
-                          <small>
-                            {format(p.altitudeMeters)}m × {format(p.effectiveCoins)}枚
-                          </small>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <div className="ranking-list" role="region" aria-label="4位〜100位一覧">
-                    {rankingView && rankingView.top100.length > 3 ? (
-                      rankingView.top100.slice(3).map(entry => (
-                        <div
-                          className={`ranking-row ${entry.playerId === playerId.current ? 'is-me' : ''}`}
-                          key={entry.playerId}
-                        >
-                          <span className="r-rank">#{entry.rank}</span>
-                          <span className="r-name">{entry.nickname}</span>
-                          <span className="r-detail">
-                            {format(entry.altitudeMeters)}m / {format(entry.effectiveCoins)}枚
-                          </span>
-                          <strong className="r-score">{format(entry.score)}</strong>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="subtle">4位以下の記録はまだありません。</p>
-                    )}
-                  </div>
-
-                  <div className="my-rank-bar">
-                    <span>今週の自己ベスト:</span>
-                    {rankingView?.myRecord ? (
-                      <b>
-                        {rankingView.myRecord.rank
-                          ? `${rankingView.myRecord.rank}位`
-                          : '未公開（仮記録）'}{' '}
-                        / {format(rankingView.myRecord.score)}点
-                      </b>
-                    ) : (
-                      <b>未記録</b>
-                    )}
-                  </div>
-
-                  <button className="primary" onClick={() => setRankingOpen(false)}>
-                    閉じる<span>↩</span>
-                  </button>
                 </>
               ) : assetModalOpen ? (
                 <>

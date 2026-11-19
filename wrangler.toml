@@ -9,3 +9,12 @@ command = "npm run build"
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
+
+[durable_objects]
+bindings = [
+  { name = "RANKING_STORE", class_name = "RankingStore" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RankingStore"]

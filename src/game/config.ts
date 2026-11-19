@@ -41,4 +41,4 @@ export const CONFIG = Object.freeze({
 });
 
 export type Quality = 'low' | 'medium' | 'high';
-export const PIXEL_RATIO: Record<Quality, number> = { low: 1, medium: 1.5, high: 2 };
+export const PIXEL_RATIO: Record<Quality, number> = { low: 1, medium: 1.25, high: 1.75 };

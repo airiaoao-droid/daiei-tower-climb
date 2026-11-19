@@ -90,8 +90,11 @@ export class TowerScene {
 
   constructor(private host: HTMLElement, quality: Quality) {
     this.quality = quality;
+    const isCoarsePointer =
+      typeof window !== 'undefined' &&
+      (window.matchMedia?.('(pointer: coarse)').matches || window.innerWidth <= 820);
     this.renderer = new THREE.WebGLRenderer({
-      antialias: true,
+      antialias: !isCoarsePointer && quality !== 'low',
       alpha: false,
       powerPreference: 'high-performance',
     });
@@ -354,6 +357,10 @@ export class TowerScene {
         if (this.disposed) return;
         const template = gltf.scene;
         for (const modGroup of this.modules) {
+          // Hide procedural fallback meshes once the GLB tower section is loaded to avoid double draw calls
+          for (const child of modGroup.children) {
+            child.visible = false;
+          }
           const clone = template.clone(true);
           // Scale 10m tower section to seamlessly match the 8m module height and 3-lane width
           clone.position.set(0, 0, 0);

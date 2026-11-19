@@ -108,15 +108,17 @@ function persistLocalWeek(weekId: string) {
 }
 
 export async function fetchWeeklyRanking(weekId: string, playerId: string): Promise<WeeklyLeaderboardView> {
-  try {
-    const res = await fetch(`/api/ranking/weekly?weekId=${encodeURIComponent(weekId)}`, {
-      headers: { 'X-Player-Id': playerId },
-    });
-    if (res.ok && res.headers.get('content-type')?.includes('application/json')) {
-      return (await res.json()) as WeeklyLeaderboardView;
-    }
-  } catch {
-    // Fall back to local engine when offline or in standalone Vite dev mode
+  const res = await fetch(`/api/ranking/weekly?weekId=${encodeURIComponent(weekId)}&_t=${Date.now()}`, {
+    method: 'GET',
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: { 'X-Player-Id': playerId },
+  });
+  if (res.ok && res.headers.get('content-type')?.includes('application/json')) {
+    return (await res.json()) as WeeklyLeaderboardView;
+  }
+  if (res.status >= 400 && res.status !== 404) {
+    throw new Error(`ranking_api_error_${res.status}`);
   }
   ensureLocalWeekLoaded(weekId);
   return localEngine.getWeeklyView(weekId, playerId);
@@ -128,20 +130,21 @@ export async function submitRunRecord(submission: RunSubmission): Promise<{
   view: WeeklyLeaderboardView;
   reason?: string;
 }> {
-  try {
-    const res = await fetch('/api/ranking/submit', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Player-Id': submission.playerId,
-      },
-      body: JSON.stringify(submission),
-    });
-    if (res.ok && res.headers.get('content-type')?.includes('application/json')) {
-      return await res.json();
-    }
-  } catch {
-    // Fall back to local deterministic verification
+  const res = await fetch('/api/ranking/submit', {
+    method: 'POST',
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Player-Id': submission.playerId,
+    },
+    body: JSON.stringify(submission),
+  });
+  if (res.ok && res.headers.get('content-type')?.includes('application/json')) {
+    return await res.json();
+  }
+  if (res.status >= 400 && res.status !== 404) {
+    throw new Error(`ranking_submit_error_${res.status}`);
   }
 
   ensureLocalWeekLoaded(submission.courseId);
@@ -160,22 +163,28 @@ export async function registerPlayerNickname(
   playerId: string,
   nickname: string
 ): Promise<{ ok: boolean; error?: string; view?: WeeklyLeaderboardView }> {
-  try {
-    const res = await fetch('/api/ranking/nickname', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Player-Id': playerId,
-      },
-      body: JSON.stringify({ weekId, playerId, nickname }),
-    });
-    if (res.ok && res.headers.get('content-type')?.includes('application/json')) {
-      const data = await res.json();
-      if (data.ok) saveNicknameLocally(nickname);
+  const res = await fetch('/api/ranking/nickname', {
+    method: 'POST',
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Player-Id': playerId,
+    },
+    body: JSON.stringify({ weekId, playerId, nickname }),
+  });
+  if (res.headers.get('content-type')?.includes('application/json')) {
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      saveNicknameLocally(nickname);
       return data;
     }
-  } catch {
-    // Fall back to local engine
+    if (res.status >= 400 && res.status < 500 && res.status !== 404) {
+      return { ok: false, error: data.error || '登録に失敗しました。' };
+    }
+  }
+  if (res.status >= 500) {
+    return { ok: false, error: '共有ランキングサーバーが一時的に応答していません。' };
   }
 
   ensureLocalWeekLoaded(weekId);

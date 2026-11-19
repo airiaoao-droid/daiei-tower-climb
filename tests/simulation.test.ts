@@ -25,7 +25,9 @@ import {
   validateNickname,
   verifyRunReplay,
   WeeklyRankingEngine,
+  type WeeklyLeaderboardView,
 } from '../src/game/replay';
+import worker, { type R2BucketLike, type R2ObjectBodyLike } from '../worker/index';
 
 const running = () => ({ ...createState(), status: 'running' as const });
 
@@ -369,5 +371,119 @@ describe('Daiei Tower Climb: Mobile 9:16 UI, Swipe Controls, Weaving Course, and
     });
     expect(invalidReplay.valid).toBe(false);
     expect(validateNickname('').valid).toBe(false);
+  });
+
+  it('shares and merges weekly rankings across multiple devices via Cloudflare Worker + R2 compare-and-swap storage', async () => {
+    const store = new Map<string, { value: string; etag: string }>();
+    let etagCounter = 1;
+
+    const mockBucket: R2BucketLike = {
+      async get(key: string): Promise<R2ObjectBodyLike | null> {
+        const hit = store.get(key);
+        if (!hit) return null;
+        return {
+          httpEtag: hit.etag,
+          async json<T>() {
+            return JSON.parse(hit.value) as T;
+          },
+        };
+      },
+      async put(key, value, options) {
+        const current = store.get(key);
+        const ifMatch = options.onlyIf.get('If-Match');
+        const ifNoneMatch = options.onlyIf.get('If-None-Match');
+        if (ifNoneMatch === '*' && current) return null;
+        if (ifMatch && (!current || current.etag !== ifMatch)) return null;
+        const nextEtag = `etag-${etagCounter++}`;
+        store.set(key, { value, etag: nextEtag });
+        return { httpEtag: nextEtag };
+      },
+    };
+
+    const weekId = getJstWeekId();
+    const runDeviceA = buildAutoPilotRun(weekId, 900);
+    // Run device A until gameover
+    const stateA = createPlayState(weekId);
+    for (let i = 0; i < 4000 && stateA.status === 'running'; i++) step(stateA);
+    expect(stateA.status).toBe('gameover');
+
+    // Device B climbs further before gameover
+    const stateB = createPlayState(weekId);
+    const actionsB = [...runDeviceA.actions];
+    const actionMapB = new Map<number, Action[]>();
+    for (const a of actionsB) {
+      const list = actionMapB.get(a.tick) ?? [];
+      list.push(a.action);
+      actionMapB.set(a.tick, list);
+    }
+    for (let i = 0; i < 6000 && stateB.status === 'running'; i++) {
+      step(stateB, actionMapB.get(stateB.tick));
+    }
+    expect(stateB.status).toBe('gameover');
+    expect(stateB.score).toBeGreaterThan(stateA.score);
+
+    // 1. Device A submits run and nickname
+    const resSubmitA = await worker.fetch(
+      new Request('https://daiei-tower-climb.minna-de-shuffle.workers.dev/api/ranking/submit', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Player-Id': 'device_a_player_12345',
+        },
+        body: JSON.stringify({
+          runId: 'run_device_a_1',
+          courseId: weekId,
+          ruleVersion: CONFIG.ruleVersion,
+          totalTicks: stateA.tick,
+          actions: [],
+          nickname: 'スマホA',
+        }),
+      }),
+      { RANKING_BUCKET: mockBucket }
+    );
+    expect(resSubmitA.status).toBe(200);
+    const dataA = (await resSubmitA.json()) as { accepted: boolean; view: WeeklyLeaderboardView };
+    expect(dataA.accepted).toBe(true);
+    expect(dataA.view.top100.length).toBe(1);
+    expect(dataA.view.top100[0].nickname).toBe('スマホA');
+
+    // 2. Device B submits run and nickname from a different device/IP
+    const resSubmitB = await worker.fetch(
+      new Request('https://daiei-tower-climb.minna-de-shuffle.workers.dev/api/ranking/submit', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Player-Id': 'device_b_player_67890',
+        },
+        body: JSON.stringify({
+          runId: 'run_device_b_1',
+          courseId: weekId,
+          ruleVersion: CONFIG.ruleVersion,
+          totalTicks: stateB.tick,
+          actions: actionsB.filter(a => a.tick < stateB.tick),
+          nickname: 'スマホB',
+        }),
+      }),
+      { RANKING_BUCKET: mockBucket }
+    );
+    expect(resSubmitB.status).toBe(200);
+
+    // 3. Device A fetches weekly ranking and sees BOTH Device B (#1) and Device A (#2)
+    const resFetchA = await worker.fetch(
+      new Request(
+        `https://daiei-tower-climb.minna-de-shuffle.workers.dev/api/ranking/weekly?weekId=${weekId}`,
+        {
+          method: 'GET',
+          headers: { 'X-Player-Id': 'device_a_player_12345' },
+        }
+      ),
+      { RANKING_BUCKET: mockBucket }
+    );
+    expect(resFetchA.status).toBe(200);
+    const sharedView = (await resFetchA.json()) as WeeklyLeaderboardView;
+    expect(sharedView.totalPublicPlayers).toBe(2);
+    expect(sharedView.top100.map(e => e.nickname)).toEqual(['スマホB', 'スマホA']);
+    expect(sharedView.myRecord?.nickname).toBe('スマホA');
+    expect(sharedView.myRecord?.rank).toBe(2);
   });
 });
