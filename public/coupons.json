@@ -1,0 +1,9 @@
+[
+  {
+    "id": "sample-1",
+    "title": "サンプルクーポン",
+    "value": "10%OFF",
+    "until": "〜2026/12/31",
+    "code": "DAIEI10"
+  }
+]
